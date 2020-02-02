@@ -44,6 +44,7 @@ var DefaultConfig = Config{
 		DatasetsInMem:  1,
 		DatasetsOnDisk: 2,
 	},
+	ShardId:       0,
 	NetworkId:     1337,
 	LightPeers:    100,
 	DatabaseCache: 768,
@@ -85,6 +86,7 @@ type Config struct {
 	Genesis *core.Genesis `toml:",omitempty"`
 
 	// Protocol options
+	ShardId   uint64
 	NetworkId uint64 // Network ID to use for selecting peers to connect to
 	SyncMode  downloader.SyncMode
 	NoPruning bool

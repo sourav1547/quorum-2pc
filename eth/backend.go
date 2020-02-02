@@ -92,6 +92,7 @@ type Ethereum struct {
 	etherbase common.Address
 
 	networkID     uint64
+	shardID       uint64
 	netRPCService *ethapi.PublicNetAPI
 
 	lock sync.RWMutex // Protects the variadic fields (e.g. gas price and etherbase)
@@ -153,6 +154,7 @@ func New(ctx *node.ServiceContext, config *Config) (*Ethereum, error) {
 		accountManager: ctx.AccountManager,
 		engine:         CreateConsensusEngine(ctx, chainConfig, config, config.MinerNotify, config.MinerNoverify, chainDb),
 		shutdownChan:   make(chan bool),
+		shardID:        config.ShardId,
 		networkID:      config.NetworkId,
 		gasPrice:       config.MinerGasPrice,
 		etherbase:      config.Etherbase,
@@ -165,7 +167,7 @@ func New(ctx *node.ServiceContext, config *Config) (*Ethereum, error) {
 		eth.etherbase = crypto.PubkeyToAddress(ctx.NodeKey().PublicKey)
 	}
 
-	log.Info("Initialising Ethereum protocol", "versions", ProtocolVersions, "network", config.NetworkId)
+	log.Info("Initialising Ethereum protocol", "versions", ProtocolVersions, "network", config.NetworkId, "shard", config.ShardId)
 
 	if !config.SkipBcVersionCheck {
 		bcVersion := rawdb.ReadDatabaseVersion(chainDb)
@@ -199,7 +201,7 @@ func New(ctx *node.ServiceContext, config *Config) (*Ethereum, error) {
 	}
 	eth.txPool = core.NewTxPool(config.TxPool, eth.chainConfig, eth.blockchain)
 
-	if eth.protocolManager, err = NewProtocolManager(eth.chainConfig, config.SyncMode, config.NetworkId, eth.eventMux, eth.txPool, eth.engine, eth.blockchain, chainDb, config.RaftMode); err != nil {
+	if eth.protocolManager, err = NewProtocolManager(eth.chainConfig, config.SyncMode, config.ShardId, config.NetworkId, eth.eventMux, eth.txPool, eth.engine, eth.blockchain, chainDb, config.RaftMode); err != nil {
 		return nil, err
 	}
 
@@ -506,6 +508,7 @@ func (s *Ethereum) Engine() consensus.Engine           { return s.engine }
 func (s *Ethereum) ChainDb() ethdb.Database            { return s.chainDb }
 func (s *Ethereum) IsListening() bool                  { return true } // Always listening
 func (s *Ethereum) EthVersion() int                    { return int(s.protocolManager.SubProtocols[0].Version) }
+func (s *Ethereum) ShardId() uint64                    { return s.shardID }
 func (s *Ethereum) NetVersion() uint64                 { return s.networkID }
 func (s *Ethereum) Downloader() *downloader.Downloader { return s.protocolManager.downloader }
 

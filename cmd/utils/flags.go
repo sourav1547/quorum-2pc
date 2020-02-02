@@ -130,6 +130,11 @@ var (
 		Name:  "nousb",
 		Usage: "Disables monitoring for and managing USB hardware wallets",
 	}
+	ShardIdFlag = cli.Uint64Flag{
+		Name:  "shardid",
+		Usage: "Shard Number for each node in the network, (default=0:Reference shard)",
+		Value: eth.DefaultConfig.ShardId,
+	}
 	NetworkIdFlag = cli.Uint64Flag{
 		Name:  "networkid",
 		Usage: "Network identifier (integer, 1=Frontier, 2=Morden (disused), 3=Ropsten, 4=Rinkeby, 5=Ottoman)",
@@ -605,7 +610,7 @@ var (
 		Value: 50400,
 	}
 	RaftDNSEnabledFlag = cli.BoolFlag{
-		Name: "raftdnsenable",
+		Name:  "raftdnsenable",
 		Usage: "Enable DNS resolution of peers",
 	}
 
@@ -1213,6 +1218,9 @@ func SetEthConfig(ctx *cli.Context, stack *node.Node, cfg *eth.Config) {
 	if ctx.GlobalIsSet(LightPeersFlag.Name) {
 		cfg.LightPeers = ctx.GlobalInt(LightPeersFlag.Name)
 	}
+	if ctx.GlobalIsSet(ShardIdFlag.Name) {
+		cfg.ShardId = ctx.GlobalUint64(ShardIdFlag.Name)
+	}
 	if ctx.GlobalIsSet(NetworkIdFlag.Name) {
 		cfg.NetworkId = ctx.GlobalUint64(NetworkIdFlag.Name)
 	}
@@ -1226,7 +1234,6 @@ func SetEthConfig(ctx *cli.Context, stack *node.Node, cfg *eth.Config) {
 		Fatalf("--%s must be either 'full' or 'archive'", GCModeFlag.Name)
 	}
 	cfg.NoPruning = ctx.GlobalString(GCModeFlag.Name) == "archive"
-
 
 	if ctx.GlobalIsSet(CacheFlag.Name) || ctx.GlobalIsSet(CacheGCFlag.Name) {
 		cfg.TrieCache = ctx.GlobalInt(CacheFlag.Name) * ctx.GlobalInt(CacheGCFlag.Name) / 100

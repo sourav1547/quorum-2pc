@@ -70,6 +70,7 @@ func errResp(code errCode, format string, v ...interface{}) error {
 }
 
 type ProtocolManager struct {
+	shardID   uint64
 	networkID uint64
 
 	fastSync  uint32 // Flag whether fast sync is enabled (gets disabled if we already have blocks)
@@ -107,9 +108,10 @@ type ProtocolManager struct {
 
 // NewProtocolManager returns a new Ethereum sub protocol manager. The Ethereum sub protocol manages peers capable
 // with the Ethereum network.
-func NewProtocolManager(config *params.ChainConfig, mode downloader.SyncMode, networkID uint64, mux *event.TypeMux, txpool txPool, engine consensus.Engine, blockchain *core.BlockChain, chaindb ethdb.Database, raftMode bool) (*ProtocolManager, error) {
+func NewProtocolManager(config *params.ChainConfig, mode downloader.SyncMode, shardID, networkID uint64, mux *event.TypeMux, txpool txPool, engine consensus.Engine, blockchain *core.BlockChain, chaindb ethdb.Database, raftMode bool) (*ProtocolManager, error) {
 	// Create the protocol manager with the base fields
 	manager := &ProtocolManager{
+		shardID:     shardID,
 		networkID:   networkID,
 		eventMux:    mux,
 		txpool:      txpool,
@@ -127,7 +129,6 @@ func NewProtocolManager(config *params.ChainConfig, mode downloader.SyncMode, ne
 	if handler, ok := manager.engine.(consensus.Handler); ok {
 		handler.SetBroadcaster(manager)
 	}
-
 	// Figure out whether to allow fast sync or not
 	if mode == downloader.FastSync && blockchain.CurrentBlock().NumberU64() > 0 {
 		log.Warn("Blockchain not empty, fast sync disabled")
@@ -289,7 +290,7 @@ func (pm *ProtocolManager) handle(p *peer) error {
 		number  = head.Number.Uint64()
 		td      = pm.blockchain.GetTd(hash, number)
 	)
-	if err := p.Handshake(pm.networkID, td, hash, genesis.Hash()); err != nil {
+	if err := p.Handshake(pm.shardID, pm.networkID, td, hash, genesis.Hash()); err != nil {
 		p.Log().Debug("Ethereum handshake failed", "err", err)
 		return err
 	}
@@ -829,6 +830,7 @@ func (pm *ProtocolManager) txBroadcastLoop() {
 // known about the host peer.
 type NodeInfo struct {
 	Network    uint64              `json:"network"`    // Ethereum network ID (1=Frontier, 2=Morden, Ropsten=3, Rinkeby=4)
+	Shard      uint64              `json:"shard"`      // Shard Id (0=Reference Shard, >0 for Others)
 	Difficulty *big.Int            `json:"difficulty"` // Total difficulty of the host's blockchain
 	Genesis    common.Hash         `json:"genesis"`    // SHA3 hash of the host's genesis block
 	Config     *params.ChainConfig `json:"config"`     // Chain configuration for the fork rules
@@ -842,6 +844,7 @@ func (pm *ProtocolManager) NodeInfo() *NodeInfo {
 
 	return &NodeInfo{
 		Network:    pm.networkID,
+		Shard:      pm.shardID,
 		Difficulty: pm.blockchain.GetTd(currentBlock.Hash(), currentBlock.NumberU64()),
 		Genesis:    pm.blockchain.Genesis().Hash(),
 		Config:     pm.blockchain.Config(),

@@ -123,6 +123,7 @@ var (
 		utils.RinkebyFlag,
 		utils.OttomanFlag,
 		utils.VMEnableDebugFlag,
+		utils.ShardIdFlag,
 		utils.NetworkIdFlag,
 		utils.RPCCORSDomainFlag,
 		utils.RPCVirtualHostsFlag,
