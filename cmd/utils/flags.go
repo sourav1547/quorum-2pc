@@ -135,6 +135,11 @@ var (
 		Usage: "Shard Number for each node in the network, (default=0:Reference shard)",
 		Value: eth.DefaultConfig.ShardId,
 	}
+	NumShardFlag = cli.Uint64Flag{
+		Name:  "numshard",
+		Usage: "Total number of shard except the reference shard, (default=1 shard and 1 reference shard)",
+		Value: eth.DefaultConfig.NumShard,
+	}
 	NetworkIdFlag = cli.Uint64Flag{
 		Name:  "networkid",
 		Usage: "Network identifier (integer, 1=Frontier, 2=Morden (disused), 3=Ropsten, 4=Rinkeby, 5=Ottoman)",
@@ -1220,6 +1225,9 @@ func SetEthConfig(ctx *cli.Context, stack *node.Node, cfg *eth.Config) {
 	}
 	if ctx.GlobalIsSet(ShardIdFlag.Name) {
 		cfg.ShardId = ctx.GlobalUint64(ShardIdFlag.Name)
+	}
+	if ctx.GlobalIsSet(NumShardFlag.Name) {
+		cfg.NumShard = ctx.GlobalUint64(NumShardFlag.Name)
 	}
 	if ctx.GlobalIsSet(NetworkIdFlag.Name) {
 		cfg.NetworkId = ctx.GlobalUint64(NetworkIdFlag.Name)

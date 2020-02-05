@@ -80,6 +80,7 @@ type LightPeer interface {
 	Head() (common.Hash, *big.Int)
 	RequestHeadersByHash(common.Hash, int, int, bool) error
 	RequestHeadersByNumber(uint64, int, int, bool) error
+	Shard() uint64
 }
 
 // Peer encapsulates the methods required to synchronise with a remote full peer.
@@ -348,6 +349,10 @@ type peerSet struct {
 	lock         sync.RWMutex
 }
 
+// type shardPeerSet struct {
+// 	shardPeers map[uint64]*peerSet
+// }
+
 // newPeerSet creates a new peer set top track the active download sources.
 func newPeerSet() *peerSet {
 	return &peerSet{
@@ -355,15 +360,30 @@ func newPeerSet() *peerSet {
 	}
 }
 
+// newShardPeerSet creates a new peer
+// func newShardPeerSet() *shardPeerSet {
+// 	return &shardPeerSet{
+// 		shardPeers: make(map[uint64]*peerSet),
+// 	}
+// }
+
 // SubscribeNewPeers subscribes to peer arrival events.
 func (ps *peerSet) SubscribeNewPeers(ch chan<- *peerConnection) event.Subscription {
 	return ps.newPeerFeed.Subscribe(ch)
 }
 
+// func (sps *shardPeerSet) SubscribeNewPeers(shard uint64, ch chan<- *peerConnection) event.Subscription {
+// 	return sps.shardPeers[shard].newPeerFeed.Subscribe(ch)
+// }
+
 // SubscribePeerDrops subscribes to peer departure events.
 func (ps *peerSet) SubscribePeerDrops(ch chan<- *peerConnection) event.Subscription {
 	return ps.peerDropFeed.Subscribe(ch)
 }
+
+// func (sps *shardPeerSet) SubscribePeerDrops(shard uint64, ch chan<- *peerConnection) event.Subscription {
+// 	return sps.shardPeers[shard].peerDropFeed.Subscribe(ch)
+// }
 
 // Reset iterates over the current peer set, and resets each of the known peers
 // to prepare for a next batch of block retrieval.
@@ -375,6 +395,18 @@ func (ps *peerSet) Reset() {
 		peer.Reset()
 	}
 }
+
+// Reset a particular shard
+// func (sps *shardPeerSet) Reset(shard uint64) {
+// 	sps.shardPeers[shard].Reset()
+// }
+
+// // Reset all the cousin nodes
+// func (sps *shardPeerSet) ResetAll() {
+// 	for _, v := range sps.shardPeers {
+// 		v.Reset()
+// 	}
+// }
 
 // Register injects a new peer into the working set, or returns an error if the
 // peer is already known.
@@ -415,6 +447,10 @@ func (ps *peerSet) Register(p *peerConnection) error {
 	return nil
 }
 
+// func (sps *shardPeerSet) Register(shard uint64, p *peerConnection) error {
+// 	return sps.shardPeers[shard].Register(p)
+// }
+
 // Unregister removes a remote peer from the active set, disabling any further
 // actions to/from that particular entity.
 func (ps *peerSet) Unregister(id string) error {
@@ -431,6 +467,11 @@ func (ps *peerSet) Unregister(id string) error {
 	return nil
 }
 
+// Unregister a node from a give shard
+// func (sps *shardPeerSet) Unregister(shard uint64, id string) error {
+// 	return sps.shardPeers[shard].Unregister(id)
+// }
+
 // Peer retrieves the registered peer with the given id.
 func (ps *peerSet) Peer(id string) *peerConnection {
 	ps.lock.RLock()
@@ -439,6 +480,10 @@ func (ps *peerSet) Peer(id string) *peerConnection {
 	return ps.peers[id]
 }
 
+// func (sps *shardPeerSet) Peer(shard uint64, id string) *peerConnection {
+// 	return sps.shardPeers[shard].Peer(id)
+// }
+
 // Len returns if the current number of peers in the set.
 func (ps *peerSet) Len() int {
 	ps.lock.RLock()
@@ -446,6 +491,20 @@ func (ps *peerSet) Len() int {
 
 	return len(ps.peers)
 }
+
+// // Current number of peers per shard
+// func (sps *shardPeerSet) Len(shard uint64) int {
+// 	return sps.shardPeers[shard].Len()
+// }
+
+// // Total number of peers accross all shard
+// func (sps *shardPeerSet) TotalLen() int {
+// 	total := 0
+// 	for _, v := range sps.shardPeers {
+// 		total = total + v.Len()
+// 	}
+// 	return total
+// }
 
 // AllPeers retrieves a flat list of all the peers within the set.
 func (ps *peerSet) AllPeers() []*peerConnection {
@@ -458,6 +517,11 @@ func (ps *peerSet) AllPeers() []*peerConnection {
 	}
 	return list
 }
+
+// // All peers corresponding to a single shard.
+// func (sps *shardPeerSet) AllPeers(shard uint64) []*peerConnection {
+// 	return sps.shardPeers[shard].AllPeers()
+// }
 
 // HeaderIdlePeers retrieves a flat list of all the currently header-idle peers
 // within the active peer set, ordered by their reputation.

@@ -32,6 +32,7 @@ import (
 
 var (
 	errClosed            = errors.New("peer set is closed")
+	errShardClosed       = errors.New("shard peer set is closed")
 	errAlreadyRegistered = errors.New("peer is already registered")
 	errNotRegistered     = errors.New("peer is not registered")
 )
@@ -61,6 +62,7 @@ const (
 // PeerInfo represents a short summary of the Ethereum sub-protocol metadata known
 // about a connected peer.
 type PeerInfo struct {
+	Shard      uint64   `json:"shard"`      // Shard number of the peer
 	Version    int      `json:"version"`    // Ethereum protocol version negotiated
 	Difficulty *big.Int `json:"difficulty"` // Total difficulty of the peer's blockchain
 	Head       string   `json:"head"`       // SHA3 hash of the peer's best owned block
@@ -78,6 +80,7 @@ type peer struct {
 	*p2p.Peer
 	rw p2p.MsgReadWriter
 
+	shard    uint64
 	version  int         // Protocol version negotiated
 	forkDrop *time.Timer // Timed connection dropper if forks aren't validated in time
 
@@ -93,10 +96,11 @@ type peer struct {
 	term        chan struct{}             // Termination channel to stop the broadcaster
 }
 
-func newPeer(version int, p *p2p.Peer, rw p2p.MsgReadWriter) *peer {
+func newPeer(shard uint64, version int, p *p2p.Peer, rw p2p.MsgReadWriter) *peer {
 	return &peer{
 		Peer:        p,
 		rw:          rw,
+		shard:       shard,
 		version:     version,
 		id:          fmt.Sprintf("%x", p.ID().Bytes()[:8]),
 		knownTxs:    mapset.NewSet(),
@@ -148,10 +152,15 @@ func (p *peer) Info() *PeerInfo {
 	hash, td := p.Head()
 
 	return &PeerInfo{
+		Shard:      p.shard,
 		Version:    p.version,
 		Difficulty: td,
 		Head:       hash.Hex(),
 	}
+}
+
+func (p *peer) Shard() uint64 {
+	return p.shard
 }
 
 // Head retrieves a copy of the current head hash and total difficulty of the
@@ -411,6 +420,18 @@ type peerSet struct {
 	closed bool
 }
 
+// shardPeerSet represents on the collection of active peers
+// type shardPeerSet struct {
+// 	shardPeers map[uint64]*peerSet
+// }
+
+// // return new shard peers set
+// func newShardPeerSet() *shardPeerSet {
+// 	return &shardPeerSet{
+// 		shardPeers: make(map[uint64]*peerSet),
+// 	}
+// }
+
 // newPeerSet creates a new peer set to track the active participants.
 func newPeerSet() *peerSet {
 	return &peerSet{
@@ -437,6 +458,10 @@ func (ps *peerSet) Register(p *peer) error {
 	return nil
 }
 
+// func (sps *shardPeerSet) Register(shard uint64, p *peer) error {
+// 	return sps.shardPeers[shard].Register(p)
+// }
+
 // Unregister removes a remote peer from the active set, disabling any further
 // actions to/from that particular entity.
 func (ps *peerSet) Unregister(id string) error {
@@ -453,6 +478,15 @@ func (ps *peerSet) Unregister(id string) error {
 	return nil
 }
 
+// func (sps *shardPeerSet) Unregister(shard uint64, id string) error {
+// 	return sps.shardPeers[shard].Unregister(id)
+// }
+
+// // Return all registered peers for a shard
+// func (sps *shardPeerSet) Peers(shard uint64) map[string]*peer {
+// 	return sps.shardPeers[shard].Peers()
+// }
+
 // Peers returns all registered peers
 func (ps *peerSet) Peers() map[string]*peer {
 	ps.lock.RLock()
@@ -465,6 +499,11 @@ func (ps *peerSet) Peers() map[string]*peer {
 	return set
 }
 
+// Retrieve a peer from a specific shard
+// func (sps *shardPeerSet) Peer(shard uint64, id string) *peer {
+// 	return sps.shardPeers[shard].Peer(id)
+// }
+
 // Peer retrieves the registered peer with the given id.
 func (ps *peerSet) Peer(id string) *peer {
 	ps.lock.RLock()
@@ -472,6 +511,20 @@ func (ps *peerSet) Peer(id string) *peer {
 
 	return ps.peers[id]
 }
+
+// Current number of peers per shard
+// func (sps *shardPeerSet) Len(shard uint64) int {
+// 	return sps.shardPeers[shard].Len()
+// }
+
+// Total number of peers accross all shard
+// func (sps *shardPeerSet) TotalLen() int {
+// 	total := 0
+// 	for _, v := range sps.shardPeers {
+// 		total = total + v.Len()
+// 	}
+// 	return total
+// }
 
 // Len returns if the current number of peers in the set.
 func (ps *peerSet) Len() int {
@@ -539,3 +592,13 @@ func (ps *peerSet) Close() {
 	}
 	ps.closed = true
 }
+
+// func (sps *shardPeerSet) Close(shard uint64) {
+// 	sps.shardPeers[shard].Close()
+// }
+
+// func (sps *shardPeerSet) CloseAll() {
+// 	for _, v := range sps.shardPeers {
+// 		v.Close()
+// 	}
+// }

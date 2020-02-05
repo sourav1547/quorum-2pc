@@ -395,7 +395,7 @@ func copyDb(ctx *cli.Context) error {
 	chain, chainDb := utils.MakeChain(ctx, stack)
 
 	syncmode := *utils.GlobalTextMarshaler(ctx, utils.SyncModeFlag.Name).(*downloader.SyncMode)
-	dl := downloader.New(syncmode, chainDb, new(event.TypeMux), chain, nil, nil)
+	dl := downloader.New(syncmode, chainDb, new(event.TypeMux), chain, nil, nil, uint64(0))
 
 	// Create a source peer to satisfy downloader requests from
 	db, err := ethdb.NewLDBDatabase(ctx.Args().First(), ctx.GlobalInt(utils.CacheFlag.Name), 256)
@@ -406,10 +406,13 @@ func copyDb(ctx *cli.Context) error {
 	if err != nil {
 		return err
 	}
-	peer := downloader.NewFakePeer("local", db, hc, dl)
-	if err = dl.RegisterPeer("local", 63, peer); err != nil {
-		return err
-	}
+	/*
+		// @sourav, todo: correctly implement this if needed.
+		peer := downloader.NewFakePeer("local", db, hc, dl)
+		if err = dl.RegisterPeer(uint64(0), "local", 63, peer); err != nil {
+			return err
+		}
+	*/
 	// Synchronise with the simulated peer
 	start := time.Now()
 

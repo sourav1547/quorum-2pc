@@ -23,6 +23,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 
 	"github.com/ethereum/go-ethereum/params"
@@ -339,18 +340,18 @@ func (c *Config) NodeKey() *ecdsa.PrivateKey {
 }
 
 // StaticNodes returns a list of node enode URLs configured as static nodes.
-func (c *Config) StaticNodes() []*enode.Node {
+func (c *Config) StaticNodes() map[uint64][]*enode.Node {
 	return c.parsePersistentNodes(c.ResolvePath(datadirStaticNodes))
 }
 
 // TrustedNodes returns a list of node enode URLs configured as trusted nodes.
-func (c *Config) TrustedNodes() []*enode.Node {
+func (c *Config) TrustedNodes() map[uint64][]*enode.Node {
 	return c.parsePersistentNodes(c.ResolvePath(datadirTrustedNodes))
 }
 
 // parsePersistentNodes parses a list of discovery node URLs loaded from a .json
 // file from within the data directory.
-func (c *Config) parsePersistentNodes(path string) []*enode.Node {
+func (c *Config) parsePersistentNodes(path string) map[uint64][]*enode.Node {
 	// Short circuit if no node config is present
 	if c.DataDir == "" {
 		return nil
@@ -365,9 +366,21 @@ func (c *Config) parsePersistentNodes(path string) []*enode.Node {
 		return nil
 	}
 	// Interpret the list as a discovery node array
-	var nodes []*enode.Node
+	var (
+		shardID uint64
+		err     error
+	)
+	var nodes = make(map[uint64][]*enode.Node)
 	for _, url := range nodelist {
 		if url == "" {
+			continue
+		} else if url[0:5] == "shard" {
+
+			if shardID, err = strconv.ParseUint(url[6:], 10, 64); err != nil {
+				log.Warn("Shard ID parsing failed")
+			}
+			// log.Info("Extracted Shard ID", "shard", shardID)
+			nodes[shardID] = []*enode.Node{}
 			continue
 		}
 		node, err := enode.ParseV4(url)
@@ -375,7 +388,7 @@ func (c *Config) parsePersistentNodes(path string) []*enode.Node {
 			log.Error(fmt.Sprintf("Node URL %s: %v\n", url, err))
 			continue
 		}
-		nodes = append(nodes, node)
+		nodes[shardID] = append(nodes[shardID], node)
 	}
 	return nodes
 }

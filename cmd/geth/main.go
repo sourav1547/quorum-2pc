@@ -124,6 +124,7 @@ var (
 		utils.OttomanFlag,
 		utils.VMEnableDebugFlag,
 		utils.ShardIdFlag,
+		utils.NumShardFlag,
 		utils.NetworkIdFlag,
 		utils.RPCCORSDomainFlag,
 		utils.RPCVirtualHostsFlag,

@@ -51,7 +51,8 @@ const (
 type peer struct {
 	*p2p.Peer
 
-	rw p2p.MsgReadWriter
+	rw    p2p.MsgReadWriter
+	shard uint64
 
 	version int    // Protocol version negotiated
 	network uint64 // Network ID being on
@@ -100,10 +101,15 @@ func (p *peer) queueSend(f func()) {
 // Info gathers and returns a collection of metadata known about a peer.
 func (p *peer) Info() *eth.PeerInfo {
 	return &eth.PeerInfo{
+		Shard:      p.shard,
 		Version:    p.version,
 		Difficulty: p.Td(),
 		Head:       fmt.Sprintf("%x", p.Head()),
 	}
+}
+
+func (p *peer) Shard() uint64 {
+	return p.shard
 }
 
 // Head retrieves a copy of the current head (most recent) hash of the peer.

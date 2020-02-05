@@ -70,7 +70,8 @@ func errResp(code errCode, format string, v ...interface{}) error {
 }
 
 type ProtocolManager struct {
-	shardID   uint64
+	numShard  uint64
+	myshard   uint64
 	networkID uint64
 
 	fastSync  uint32 // Flag whether fast sync is enabled (gets disabled if we already have blocks)
@@ -81,9 +82,9 @@ type ProtocolManager struct {
 	chainconfig *params.ChainConfig
 	maxPeers    int
 
-	downloader *downloader.Downloader
-	fetcher    *fetcher.Fetcher
-	peers      *peerSet
+	downloader  *downloader.Downloader
+	fetcher     *fetcher.Fetcher
+	cousinPeers map[uint64]*peerSet
 
 	SubProtocols []p2p.Protocol
 
@@ -108,16 +109,17 @@ type ProtocolManager struct {
 
 // NewProtocolManager returns a new Ethereum sub protocol manager. The Ethereum sub protocol manages peers capable
 // with the Ethereum network.
-func NewProtocolManager(config *params.ChainConfig, mode downloader.SyncMode, shardID, networkID uint64, mux *event.TypeMux, txpool txPool, engine consensus.Engine, blockchain *core.BlockChain, chaindb ethdb.Database, raftMode bool) (*ProtocolManager, error) {
+func NewProtocolManager(config *params.ChainConfig, mode downloader.SyncMode, numShard, myshard, networkID uint64, mux *event.TypeMux, txpool txPool, engine consensus.Engine, blockchain *core.BlockChain, chaindb ethdb.Database, raftMode bool) (*ProtocolManager, error) {
 	// Create the protocol manager with the base fields
 	manager := &ProtocolManager{
-		shardID:     shardID,
+		numShard:    numShard,
+		myshard:     myshard,
 		networkID:   networkID,
 		eventMux:    mux,
 		txpool:      txpool,
 		blockchain:  blockchain,
 		chainconfig: config,
-		peers:       newPeerSet(),
+		cousinPeers: make(map[uint64]*peerSet),
 		newPeerCh:   make(chan *peer),
 		noMorePeers: make(chan struct{}),
 		txsyncCh:    make(chan *txsync),
@@ -152,7 +154,7 @@ func NewProtocolManager(config *params.ChainConfig, mode downloader.SyncMode, sh
 			Version: version,
 			Length:  protocol.Lengths[i],
 			Run: func(p *p2p.Peer, rw p2p.MsgReadWriter) error {
-				peer := manager.newPeer(int(version), p, rw)
+				peer := manager.newPeer(myshard, int(version), p, rw)
 				select {
 				case manager.newPeerCh <- peer:
 					manager.wg.Add(1)
@@ -165,19 +167,40 @@ func NewProtocolManager(config *params.ChainConfig, mode downloader.SyncMode, sh
 			NodeInfo: func() interface{} {
 				return manager.NodeInfo()
 			},
-			PeerInfo: func(id enode.ID) interface{} {
-				if p := manager.peers.Peer(fmt.Sprintf("%x", id[:8])); p != nil {
-					return p.Info()
+			// PeerInfo: func(id enode.ID) interface{} {
+			// 	if p := manager.peers.Peer(fmt.Sprintf("%x", id[:8])); p != nil {
+			// 		return p.Info()
+			// 	}
+			// 	return nil
+			// },
+			CousinPeerInfo: func(id enode.ID) interface{} {
+				for _, peers := range manager.cousinPeers {
+					if p := peers.Peer(fmt.Sprintf("%x", id[:8])); p != nil {
+						return p.Info()
+					}
 				}
+				// i := uint64(0)
+				// for i < numShard {
+				// 	if p := manager.cousinPeers.Peer(i, fmt.Sprintf("%x", id[:8])); p != nil {
+				// 		return p.Info()
+				// 	}
+				// 	i = i + 1
+				// }
 				return nil
 			},
+			// RefPeerInfo: func(id enode.ID) interface{} {
+			// 	if p := manager.refPeers.Peer(fmt.Sprintf("%x", id[:8])); p != nil {
+			// 		return p.Info()
+			// 	}
+			// 	return nil
+			// },
 		})
 	}
 	if len(manager.SubProtocols) == 0 {
 		return nil, errIncompatibleConfig
 	}
 	// Construct the different synchronisation mechanisms
-	manager.downloader = downloader.New(mode, chaindb, manager.eventMux, blockchain, nil, manager.removePeer)
+	manager.downloader = downloader.New(mode, chaindb, manager.eventMux, blockchain, nil, manager.removePeer, myshard)
 
 	validator := func(header *types.Header) error {
 		return engine.VerifyHeader(blockchain, header, true)
@@ -199,9 +222,22 @@ func NewProtocolManager(config *params.ChainConfig, mode downloader.SyncMode, sh
 	return manager, nil
 }
 
+// GetShardID returns the shard of a peer
+func (pm *ProtocolManager) GetShardID(id string) uint64 {
+	for shard, peers := range pm.cousinPeers {
+		for p := range peers.peers {
+			if id == p {
+				return shard
+			}
+		}
+	}
+	return uint64(4096)
+}
+
 func (pm *ProtocolManager) removePeer(id string) {
 	// Short circuit if the peer was already removed
-	peer := pm.peers.Peer(id)
+	peerShard := pm.GetShardID(id)
+	peer := pm.cousinPeers[peerShard].Peer(id)
 	if peer == nil {
 		return
 	}
@@ -209,7 +245,7 @@ func (pm *ProtocolManager) removePeer(id string) {
 
 	// Unregister the peer from the downloader and Ethereum peer set
 	pm.downloader.UnregisterPeer(id)
-	if err := pm.peers.Unregister(id); err != nil {
+	if err := pm.cousinPeers[peerShard].Unregister(id); err != nil {
 		log.Error("Peer removal failed", "peer", id, "err", err)
 	}
 	// Hard disconnect at the networking layer
@@ -217,6 +253,23 @@ func (pm *ProtocolManager) removePeer(id string) {
 		peer.Peer.Disconnect(p2p.DiscUselessPeer)
 	}
 }
+
+// // @sourav, todo: Merge this with removePeer function for modularity
+// func (pm *ProtocolManager) removeCousinPeer(shard uint64, id string) {
+// 	cpeer := pm.cousinPeers[shard].Peer(id)
+// 	if cpeer == nil {
+// 		return
+// 	}
+// 	log.Debug("Removing a cousing peer", "cpeer", id)
+// 	pm.downloader.UnregisterPeer(id)
+// 	if err := pm.cousinPeers[shard].Unregister(id); err != nil {
+// 		log.Error("Cousin Peer removal failed", "cpeer", id, "err", err)
+// 	}
+
+// 	if cpeer != nil {
+// 		cpeer.Peer.Disconnect(p2p.DiscUselessPeer)
+// 	}
+// }
 
 func (pm *ProtocolManager) Start(maxPeers int) {
 	pm.maxPeers = maxPeers
@@ -261,7 +314,9 @@ func (pm *ProtocolManager) Stop() {
 	// This also closes the gate for any new registrations on the peer set.
 	// sessions which are already established but not added to pm.peers yet
 	// will exit when they try to register.
-	pm.peers.Close()
+	for _, peers := range pm.cousinPeers {
+		peers.Close()
+	}
 
 	// Wait for all peer handler goroutines and the loops to come down.
 	pm.wg.Wait()
@@ -269,18 +324,23 @@ func (pm *ProtocolManager) Stop() {
 	log.Info("Ethereum protocol stopped")
 }
 
-func (pm *ProtocolManager) newPeer(pv int, p *p2p.Peer, rw p2p.MsgReadWriter) *peer {
-	return newPeer(pv, p, newMeteredMsgWriter(rw))
+func (pm *ProtocolManager) newPeer(myshard uint64, pv int, p *p2p.Peer, rw p2p.MsgReadWriter) *peer {
+	return newPeer(myshard, pv, p, newMeteredMsgWriter(rw))
 }
 
 // handle is the callback invoked to manage the life cycle of an eth peer. When
 // this function terminates, the peer is disconnected.
 func (pm *ProtocolManager) handle(p *peer) error {
-	// Ignore maxPeers if this is a trusted peer
-	if pm.peers.Len() >= pm.maxPeers && !p.Peer.Info().Network.Trusted {
-		return p2p.DiscTooManyPeers
+
+	peerShard := p.Shard()
+	// For each shard, put a threshold on the number of peers.
+	if pm.cousinPeers[peerShard] == nil {
+		pm.cousinPeers[peerShard] = newPeerSet()
 	}
-	p.Log().Debug("Ethereum peer connected", "name", p.Name())
+	if pm.cousinPeers[peerShard].Len() >= pm.maxPeers && !p.Peer.Info().Network.Trusted {
+		return p2p.DiscTooManyCousinPeers
+	}
+	p.Log().Debug("Peer connected", "shard", peerShard, "myshard", pm.myshard, "name", p.Name())
 
 	// Execute the Ethereum handshake
 	var (
@@ -290,7 +350,7 @@ func (pm *ProtocolManager) handle(p *peer) error {
 		number  = head.Number.Uint64()
 		td      = pm.blockchain.GetTd(hash, number)
 	)
-	if err := p.Handshake(pm.shardID, pm.networkID, td, hash, genesis.Hash()); err != nil {
+	if err := p.Handshake(pm.myshard, pm.networkID, td, hash, genesis.Hash()); err != nil {
 		p.Log().Debug("Ethereum handshake failed", "err", err)
 		return err
 	}
@@ -298,7 +358,7 @@ func (pm *ProtocolManager) handle(p *peer) error {
 		rw.Init(p.version)
 	}
 	// Register the peer locally
-	if err := pm.peers.Register(p); err != nil {
+	if err := pm.cousinPeers[peerShard].Register(p); err != nil {
 		p.Log().Error("Ethereum peer registration failed", "err", err)
 		return err
 	}
@@ -741,7 +801,7 @@ func (pm *ProtocolManager) Enqueue(id string, block *types.Block) {
 // will only announce it's availability (depending what's requested).
 func (pm *ProtocolManager) BroadcastBlock(block *types.Block, propagate bool) {
 	hash := block.Hash()
-	peers := pm.peers.PeersWithoutBlock(hash)
+	peers := pm.cousinPeers[pm.myshard].PeersWithoutBlock(hash)
 
 	// If propagation is requested, send to a subset of the peer
 	if propagate {
@@ -790,7 +850,7 @@ func (pm *ProtocolManager) BroadcastTxs(txs types.Transactions) {
 	// arise here, and we should add logic to send to *all* peers in raft mode.
 
 	for _, tx := range txs {
-		peers := pm.peers.PeersWithoutTx(tx.Hash())
+		peers := pm.cousinPeers[pm.myshard].PeersWithoutTx(tx.Hash())
 		for _, peer := range peers {
 			txset[peer] = append(txset[peer], tx)
 		}
@@ -844,7 +904,7 @@ func (pm *ProtocolManager) NodeInfo() *NodeInfo {
 
 	return &NodeInfo{
 		Network:    pm.networkID,
-		Shard:      pm.shardID,
+		Shard:      pm.myshard,
 		Difficulty: pm.blockchain.GetTd(currentBlock.Hash(), currentBlock.NumberU64()),
 		Genesis:    pm.blockchain.Genesis().Hash(),
 		Config:     pm.blockchain.Config(),
@@ -874,7 +934,7 @@ func (pm *ProtocolManager) getConsensusAlgorithm() string {
 
 func (self *ProtocolManager) FindPeers(targets map[common.Address]bool) map[common.Address]consensus.Peer {
 	m := make(map[common.Address]consensus.Peer)
-	for _, p := range self.peers.Peers() {
+	for _, p := range self.cousinPeers[self.myshard].Peers() {
 		pubKey := p.Node().Pubkey()
 		addr := crypto.PubkeyToAddress(*pubKey)
 		if targets[addr] {

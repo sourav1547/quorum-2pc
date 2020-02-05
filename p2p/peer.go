@@ -115,6 +115,10 @@ type Peer struct {
 	events *event.Feed
 }
 
+type ShardPeers struct {
+	shardPeers map[enode.ID]*Peer
+}
+
 // NewPeer returns a peer for testing purposes.
 func NewPeer(id enode.ID, name string, caps []Cap) *Peer {
 	pipe, _ := net.Pipe()

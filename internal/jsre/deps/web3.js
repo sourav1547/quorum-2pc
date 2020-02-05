@@ -5575,6 +5575,20 @@ var properties = function () {
     ];
 };
 
+/**
+    // @sourav, todo: we have to add these APIs
+    new Property({
+        name: 'cousinPeersCount',
+        getter: 'net_cousinPeersCount',
+        outputFormatter: utils.toDecimal
+    })
+    new Property({
+        name: 'refPeerCount',
+        getter: 'net_refPeerCount',
+        outputFormatter: utils.toDecimal
+    })
+**/
+
 module.exports = Net;
 
 },{"../../utils/utils":20,"../property":45}],40:[function(require,module,exports){

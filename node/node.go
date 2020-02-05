@@ -154,18 +154,18 @@ func (n *Node) Start() error {
 	n.serverConfig.PrivateKey = n.config.NodeKey()
 	n.serverConfig.Name = n.config.NodeName()
 	n.serverConfig.Logger = n.log
-	if n.serverConfig.StaticNodes == nil {
-		n.serverConfig.StaticNodes = n.config.StaticNodes()
+	if n.serverConfig.StaticNodesAll == nil {
+		n.serverConfig.StaticNodesAll = n.config.StaticNodes()
 	}
-	if n.serverConfig.TrustedNodes == nil {
-		n.serverConfig.TrustedNodes = n.config.TrustedNodes()
+	if n.serverConfig.TrustedNodesAll == nil {
+		n.serverConfig.TrustedNodesAll = n.config.TrustedNodes()
 	}
 	if n.serverConfig.NodeDatabase == "" {
 		n.serverConfig.NodeDatabase = n.config.NodeDB()
 	}
 	n.serverConfig.EnableNodePermission = n.config.EnableNodePermission
 	n.serverConfig.DataDir = n.config.DataDir
-	running := &p2p.Server{Config: n.serverConfig}
+	running := &p2p.Server{Config: n.serverConfig} // @sourav, todo: check whether this is where the nodes are getting registerd in the network.
 	n.log.Info("Starting peer-to-peer node", "instance", n.serverConfig.Name)
 
 	// Otherwise copy and specialize the P2P configuration

@@ -68,7 +68,9 @@ type Config struct {
 
 	// MaxPeers is the maximum number of peers that can be
 	// connected. It must be greater than zero.
-	MaxPeers int
+	MaxPeers          int
+	MaxRefPeers       int
+	MaxCousinPerShard int
 
 	// MaxPendingPeers is the maximum number of peers that can be pending in the
 	// handshake phase, counted separately for inbound and outbound connections.
@@ -105,9 +107,12 @@ type Config struct {
 	// maintained and re-connected on disconnects.
 	StaticNodes []*enode.Node
 
+	StaticNodesAll map[uint64][]*enode.Node
+
 	// Trusted nodes are used as pre-configured connections which are always
 	// allowed to connect, even above the peer limit.
-	TrustedNodes []*enode.Node
+	TrustedNodes    []*enode.Node
+	TrustedNodesAll map[uint64][]*enode.Node
 
 	// Connectivity can be restricted to certain IP networks.
 	// If this option is set to a non-nil value, only hosts which match one of the
@@ -154,6 +159,7 @@ type Config struct {
 	Logger log.Logger `toml:",omitempty"`
 }
 
+var nodeMapping map[uint64][]enode.ID // To store shard to id mapping of each connected nodesar
 // Server manages all peer connections.
 type Server struct {
 	// Config fields may not be modified while the server is running.
@@ -179,6 +185,16 @@ type Server struct {
 	peerOp     chan peerOpFunc
 	peerOpDone chan struct{}
 
+	// @sourav, todo: add api
+	// refPeerOp     chan refPeerOpFunc
+	// refPeerOpDone chan struct{}
+
+	// cousinPeerOp     chan cousinPeerOpFunc
+	// cousinPeerOpDone chan struct{}
+
+	// cousinPeersOp     chan cousinPeersOpFunc
+	// cousinPeersOpDone chan struct{}
+
 	quit          chan struct{}
 	addstatic     chan *enode.Node
 	removestatic  chan *enode.Node
@@ -195,7 +211,7 @@ type Server struct {
 	checkPeerInRaft func(*enode.Node) bool
 }
 
-type peerOpFunc func(map[enode.ID]*Peer)
+type peerOpFunc func(map[uint64]map[enode.ID]*Peer)
 
 type peerDrop struct {
 	*Peer
@@ -287,6 +303,11 @@ func (c *conn) set(f connFlag, val bool) {
 	}
 }
 
+// Return node id of a peer
+func (c *conn) NodeID() enode.ID {
+	return c.node.ID()
+}
+
 // Peers returns all connected peers.
 func (srv *Server) Peers() []*Peer {
 	var ps []*Peer
@@ -294,9 +315,11 @@ func (srv *Server) Peers() []*Peer {
 	// Note: We'd love to put this function into a variable but
 	// that seems to cause a weird compiler error in some
 	// environments.
-	case srv.peerOp <- func(peers map[enode.ID]*Peer) {
-		for _, p := range peers {
-			ps = append(ps, p)
+	case srv.peerOp <- func(sps map[uint64]map[enode.ID]*Peer) {
+		for _, nodes := range sps {
+			for _, node := range nodes {
+				ps = append(ps, node)
+			}
 		}
 	}:
 		<-srv.peerOpDone
@@ -307,14 +330,58 @@ func (srv *Server) Peers() []*Peer {
 
 // PeerCount returns the number of connected peers.
 func (srv *Server) PeerCount() int {
-	var count int
+	var count = 0
 	select {
-	case srv.peerOp <- func(ps map[enode.ID]*Peer) { count = len(ps) }:
+	case srv.peerOp <- func(sps map[uint64]map[enode.ID]*Peer) {
+		for _, v := range sps {
+			count = count + len(v)
+		}
+	}:
 		<-srv.peerOpDone
 	case <-srv.quit:
 	}
 	return count
 }
+
+/**
+// @sourav, todo: add apis
+// Retrun the number of reference peers the node is connected with
+func (srv *Server) RefPeerCount() int {
+	var count int
+	select {
+	case srv.refPeerOp <- func(ps map[enode.ID]*Peer) { count = len(ps) }:
+		<-srv.refPeerOpDone
+	case <-srv.quit:
+	}
+	return count
+}
+
+// Retrun the number of cousin peers from a given shard
+func (srv *Server) CousinPeerCount(shard uint64) int {
+	var count int
+	select {
+	case srv.cousinPeerOp <- func(sps map[uint64]*ShardPeers) { count = len(sps[shard].shardPeers) }:
+		<-srv.cousinPeerOpDone
+	case <-srv.quit:
+	}
+	return count
+}
+
+// Return the total number cousin accross all shard
+func (srv *Server) CousinPeersCount() int {
+	var count int
+	select {
+	case srv.cousinPeersOp <- func(sps map[uint64]*ShardPeers) {
+		for _, v := range sps {
+			count = count + len(v.shardPeers)
+		}
+	}:
+		<-srv.cousinPeersOpDone
+	case <-srv.quit:
+	}
+	return count
+}
+**/
 
 // AddPeer connects to the given node and maintains the connection until the
 // server is shut down. If the connection fails for any reason, the server will
@@ -450,6 +517,8 @@ func (srv *Server) Start() (err error) {
 	srv.peerOp = make(chan peerOpFunc)
 	srv.peerOpDone = make(chan struct{})
 
+	nodeMapping = make(map[uint64][]enode.ID)
+
 	if err := srv.setupLocalNode(); err != nil {
 		return err
 	}
@@ -462,8 +531,15 @@ func (srv *Server) Start() (err error) {
 		return err
 	}
 
+	// Filling up the node mapping
+	for shard, nodes := range srv.StaticNodesAll {
+		for _, node := range nodes {
+			nodeMapping[shard] = append(nodeMapping[shard], node.ID())
+		}
+	}
+
 	dynPeers := srv.maxDialedConns()
-	dialer := newDialState(srv.localnode.ID(), srv.StaticNodes, srv.BootstrapNodes, srv.ntab, dynPeers, srv.NetRestrict)
+	dialer := newDialState(srv.localnode.ID(), srv.StaticNodesAll, srv.BootstrapNodes, srv.ntab, dynPeers, srv.NetRestrict)
 	srv.loopWG.Add(1)
 	go srv.run(dialer)
 	return nil
@@ -602,10 +678,21 @@ func (srv *Server) setupListening() error {
 }
 
 type dialer interface {
-	newTasks(running int, peers map[enode.ID]*Peer, now time.Time) []task
+	newTasks(running int, peers map[uint64]map[enode.ID]*Peer, now time.Time) []task
 	taskDone(task, time.Time)
-	addStatic(*enode.Node)
-	removeStatic(*enode.Node)
+	addStatic(uint64, *enode.Node)
+	removeStatic(uint64, *enode.Node)
+}
+
+func GetShardID(nodeID enode.ID) uint64 {
+	for shard, nodes := range nodeMapping {
+		for _, node := range nodes {
+			if node == nodeID {
+				return shard
+			}
+		}
+	}
+	return uint64(4096)
 }
 
 func (srv *Server) run(dialstate dialer) {
@@ -614,7 +701,10 @@ func (srv *Server) run(dialstate dialer) {
 	defer srv.nodedb.Close()
 
 	var (
-		peers        = make(map[enode.ID]*Peer)
+		// peers = make(map[enode.ID]*Peer)
+		// @sourav, todo
+		// refPeers     = make(map[enode.ID]*Peer)
+		cousinPeers  = make(map[uint64]map[enode.ID]*Peer)
 		inboundCount = 0
 		trusted      = make(map[enode.ID]bool, len(srv.TrustedNodes))
 		taskdone     = make(chan task, maxActiveDialTasks)
@@ -625,6 +715,10 @@ func (srv *Server) run(dialstate dialer) {
 	// Trusted peers are loaded on startup or added via AddTrustedPeer RPC.
 	for _, n := range srv.TrustedNodes {
 		trusted[n.ID()] = true
+	}
+
+	for k := range nodeMapping {
+		cousinPeers[k] = make(map[enode.ID]*Peer)
 	}
 
 	// removes t from runningTasks
@@ -652,7 +746,8 @@ func (srv *Server) run(dialstate dialer) {
 		queuedTasks = append(queuedTasks[:0], startTasks(queuedTasks)...)
 		// Query dialer for new tasks and start as many as possible now.
 		if len(runningTasks) < maxActiveDialTasks {
-			nt := dialstate.newTasks(len(runningTasks)+len(queuedTasks), peers, time.Now())
+			srv.log.Info("Scheduling task", "cousinPeers", cousinPeers)
+			nt := dialstate.newTasks(len(runningTasks)+len(queuedTasks), cousinPeers, time.Now())
 			queuedTasks = append(queuedTasks, startTasks(nt)...)
 		}
 	}
@@ -670,14 +765,16 @@ running:
 			// ephemeral static peer list. Add it to the dialer,
 			// it will keep the node connected.
 			srv.log.Trace("Adding static node", "node", n)
-			dialstate.addStatic(n)
+			shardID := GetShardID(n.ID())
+			dialstate.addStatic(shardID, n)
 		case n := <-srv.removestatic:
 			// This channel is used by RemovePeer to send a
 			// disconnect request to a peer and begin the
 			// stop keeping the node connected.
+			shardID := GetShardID(n.ID())
 			srv.log.Trace("Removing static node", "node", n)
-			dialstate.removeStatic(n)
-			if p, ok := peers[n.ID()]; ok {
+			dialstate.removeStatic(shardID, n)
+			if p, ok := cousinPeers[shardID][n.ID()]; ok {
 				p.Disconnect(DiscRequested)
 			}
 		case n := <-srv.addtrusted:
@@ -685,8 +782,9 @@ running:
 			// to the trusted node set.
 			srv.log.Trace("Adding trusted node", "node", n)
 			trusted[n.ID()] = true
+			shardID := GetShardID(n.ID())
 			// Mark any already-connected peer as trusted
-			if p, ok := peers[n.ID()]; ok {
+			if p, ok := cousinPeers[shardID][n.ID()]; ok {
 				p.rw.set(trustedConn, true)
 			}
 		case n := <-srv.removetrusted:
@@ -697,13 +795,30 @@ running:
 				delete(trusted, n.ID())
 			}
 			// Unmark any already-connected peer as trusted
-			if p, ok := peers[n.ID()]; ok {
+			shardID := GetShardID(n.ID())
+			if p, ok := cousinPeers[shardID][n.ID()]; ok {
 				p.rw.set(trustedConn, false)
 			}
 		case op := <-srv.peerOp:
 			// This channel is used by Peers and PeerCount.
-			op(peers)
+			op(cousinPeers)
+			// op(peers)
 			srv.peerOpDone <- struct{}{}
+		/**
+		// @sourav, todo: add api
+		case rp := <-srv.refPeerOp:
+			// This channel is used by RefPeerCount.
+			rp(refPeers)
+			srv.refPeerOpDone <- struct{}{}
+		case sps := <-srv.cousinPeerOp:
+			// This channel is used to get the number of CousinPeerCount
+			sps(cousinPeers)
+			srv.cousinPeerOpDone <- struct{}{}
+		case tsps := <-srv.cousinPeersOp:
+			// This channel is used to get the number of CousinPeerCountAll
+			tsps(cousinPeers)
+			srv.cousinPeersOpDone <- struct{}{}
+		**/
 		case t := <-taskdone:
 			// A task got done. Tell dialstate about it so it
 			// can update its state and remove it from the active
@@ -719,15 +834,17 @@ running:
 				c.flags |= trustedConn
 			}
 			// TODO: track in-progress inbound node IDs (pre-Peer) to avoid dialing them.
+			shardID := GetShardID(c.node.ID())
 			select {
-			case c.cont <- srv.encHandshakeChecks(peers, inboundCount, c):
+			case c.cont <- srv.encHandshakeChecks(cousinPeers[shardID], inboundCount, c):
 			case <-srv.quit:
 				break running
 			}
 		case c := <-srv.addpeer:
 			// At this point the connection is past the protocol handshake.
 			// Its capabilities are known and the remote identity is verified.
-			err := srv.protoHandshakeChecks(peers, inboundCount, c)
+			shardID := GetShardID(c.node.ID())
+			err := srv.protoHandshakeChecks(cousinPeers[shardID], inboundCount, c)
 			if err == nil {
 				// The handshakes are done and it passed all checks.
 				p := newPeer(c, srv.Protocols)
@@ -737,9 +854,10 @@ running:
 					p.events = &srv.peerFeed
 				}
 				name := truncateName(c.name)
-				srv.log.Debug("Adding p2p peer", "name", name, "addr", c.fd.RemoteAddr(), "peers", len(peers)+1)
+				srv.log.Debug("Adding p2p peer", "name", name, "addr", c.fd.RemoteAddr(), "peers", len(cousinPeers[shardID])+1)
+				log.Info("Adding p2p peer", "name", name, "addr", c.fd.RemoteAddr(), "peers", len(cousinPeers[shardID])+1)
 				go srv.runPeer(p)
-				peers[c.node.ID()] = p
+				cousinPeers[shardID][c.node.ID()] = p
 				if p.Inbound() {
 					inboundCount++
 				}
@@ -754,9 +872,10 @@ running:
 			}
 		case pd := <-srv.delpeer:
 			// A peer disconnected.
+			shardID := GetShardID(pd.ID())
 			d := common.PrettyDuration(mclock.Now() - pd.created)
-			pd.log.Debug("Removing p2p peer", "duration", d, "peers", len(peers)-1, "req", pd.requested, "err", pd.err)
-			delete(peers, pd.ID())
+			pd.log.Debug("Removing p2p peer", "duration", d, "peers", len(cousinPeers[shardID])-1, "req", pd.requested, "err", pd.err)
+			delete(cousinPeers[shardID], pd.ID())
 			if pd.Inbound() {
 				inboundCount--
 			}
@@ -773,16 +892,21 @@ running:
 		srv.DiscV5.Close()
 	}
 	// Disconnect all peers.
-	for _, p := range peers {
-		p.Disconnect(DiscQuitting)
+	for _, peers := range cousinPeers {
+		for _, p := range peers {
+			p.Disconnect(DiscQuitting)
+		}
 	}
+
 	// Wait for peers to shut down. Pending connections and tasks are
 	// not handled here and will terminate soon-ish because srv.quit
 	// is closed.
-	for len(peers) > 0 {
-		p := <-srv.delpeer
-		p.log.Trace("<-delpeer (spindown)", "remainingTasks", len(runningTasks))
-		delete(peers, p.ID())
+	for _, peers := range cousinPeers {
+		for len(peers) > 0 {
+			p := <-srv.delpeer
+			p.log.Trace("<-delpeer (spindown)", "remainingTasks", len(runningTasks))
+			delete(peers, p.ID())
+		}
 	}
 }
 

@@ -1733,6 +1733,24 @@ func (s *PublicNetAPI) PeerCount() hexutil.Uint {
 	return hexutil.Uint(s.net.PeerCount())
 }
 
+/**
+// @sourav, todo: add api
+// CousinPeerCount for a given shard
+func (s *PublicNetAPI) CousinPeerCount(ctx context.Context, shard uint64) hexutil.Uint {
+	return hexutil.Uint(s.net.CousinPeerCount(shard))
+}
+
+// Connected Nodes across all shard
+func (s *PublicNetAPI) CousinPeersCount() hexutil.Uint {
+	return hexutil.Uint(s.net.CousinPeersCount())
+}
+
+// RefPeerCount for a given shard.
+func (s *PublicNetAPI) RefPeerCount() hexutil.Uint {
+	return hexutil.Uint(s.net.RefPeerCount())
+}
+
+**/
 // Version returns the current ethereum protocol version.
 func (s *PublicNetAPI) Version() string {
 	return fmt.Sprintf("%d", s.networkVersion)

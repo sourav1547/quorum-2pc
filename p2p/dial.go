@@ -77,7 +77,7 @@ type dialstate struct {
 	dialing       map[enode.ID]connFlag
 	lookupBuf     []*enode.Node // current discovery lookup results
 	randomNodes   []*enode.Node // filled from Table
-	static        map[enode.ID]*dialTask
+	static        map[uint64]map[enode.ID]*dialTask
 	hist          *dialHistory
 
 	start     time.Time     // time when the dialer was first used
@@ -126,47 +126,61 @@ type waitExpireTask struct {
 	time.Duration
 }
 
-func newDialState(self enode.ID, static []*enode.Node, bootnodes []*enode.Node, ntab discoverTable, maxdyn int, netrestrict *netutil.Netlist) *dialstate {
+func newDialState(self enode.ID, static map[uint64][]*enode.Node, bootnodes []*enode.Node, ntab discoverTable, maxdyn int, netrestrict *netutil.Netlist) *dialstate {
 	s := &dialstate{
 		maxDynDials: maxdyn,
 		ntab:        ntab,
 		self:        self,
 		netrestrict: netrestrict,
-		static:      make(map[enode.ID]*dialTask),
+		static:      make(map[uint64]map[enode.ID]*dialTask),
 		dialing:     make(map[enode.ID]connFlag),
 		bootnodes:   make([]*enode.Node, len(bootnodes)),
 		randomNodes: make([]*enode.Node, maxdyn/2),
 		hist:        new(dialHistory),
 	}
 	copy(s.bootnodes, bootnodes)
-	for _, n := range static {
-		s.addStatic(n)
+	for shard, nodeList := range static {
+		for _, n := range nodeList {
+			log.Info("Inside newDialState", "shard", shard, "node", n)
+			s.addStatic(shard, n)
+		}
 	}
 	return s
 }
 
-func (s *dialstate) addStatic(n *enode.Node) {
+// func (s *dialstate) addStaticAll(shard uint64, n *enode.Node) {
+// 	if s.staticAll[shard] == nil {
+// 		s.staticAll[shard] = make(map[enode.ID]*dialTask)
+// 	}
+// 	s.staticAll[shard][n.ID()] = &dialTask{flags: staticDialedConn, dest: n}
+// }
+
+func (s *dialstate) addStatic(shard uint64, n *enode.Node) {
 	// This overwrites the task instead of updating an existing
 	// entry, giving users the opportunity to force a resolve operation.
-	s.static[n.ID()] = &dialTask{flags: staticDialedConn, dest: n}
+	if s.static[shard] == nil {
+		s.static[shard] = make(map[enode.ID]*dialTask)
+	}
+	s.static[shard][n.ID()] = &dialTask{flags: staticDialedConn, dest: n}
 }
 
-func (s *dialstate) removeStatic(n *enode.Node) {
+func (s *dialstate) removeStatic(shard uint64, n *enode.Node) {
 	// This removes a task so future attempts to connect will not be made.
-	delete(s.static, n.ID())
+	delete(s.static[shard], n.ID())
 	// This removes a previous dial timestamp so that application
 	// can force a server to reconnect with chosen peer immediately.
 	s.hist.remove(n.ID())
 }
 
-func (s *dialstate) newTasks(nRunning int, peers map[enode.ID]*Peer, now time.Time) []task {
+func (s *dialstate) newTasks(nRunning int, cousinPeers map[uint64]map[enode.ID]*Peer, now time.Time) []task {
 	if s.start.IsZero() {
 		s.start = now
 	}
 
 	var newtasks []task
 	addDial := func(flag connFlag, n *enode.Node) bool {
-		if err := s.checkDial(n, peers); err != nil {
+		shardID := GetShardID(n.ID())
+		if err := s.checkDial(n, cousinPeers[shardID]); err != nil {
 			log.Trace("Skipping dial candidate", "id", n.ID(), "addr", &net.TCPAddr{IP: n.IP(), Port: n.TCP()}, "err", err)
 			return false
 		}
@@ -177,11 +191,14 @@ func (s *dialstate) newTasks(nRunning int, peers map[enode.ID]*Peer, now time.Ti
 
 	// Compute number of dynamic dials necessary at this point.
 	needDynDials := s.maxDynDials
-	for _, p := range peers {
-		if p.rw.is(dynDialedConn) {
-			needDynDials--
+	for _, peers := range cousinPeers {
+		for _, p := range peers {
+			if p.rw.is(dynDialedConn) {
+				needDynDials--
+			}
 		}
 	}
+
 	for _, flag := range s.dialing {
 		if flag&dynDialedConn != 0 {
 			needDynDials--
@@ -192,17 +209,35 @@ func (s *dialstate) newTasks(nRunning int, peers map[enode.ID]*Peer, now time.Ti
 	s.hist.expire(now)
 
 	// Create dials for static nodes if they are not connected.
-	for id, t := range s.static {
-		err := s.checkDial(t.dest, peers)
-		switch err {
-		case errNotWhitelisted, errSelf:
-			log.Warn("Removing static dial candidate", "id", t.dest.ID, "addr", &net.TCPAddr{IP: t.dest.IP(), Port: t.dest.TCP()}, "err", err)
-			delete(s.static, t.dest.ID())
-		case nil:
-			s.dialing[id] = t.flags
-			newtasks = append(newtasks, t)
+	for shard, static := range s.static {
+		for id, t := range static {
+			err := s.checkDial(t.dest, cousinPeers[shard])
+			switch err {
+			case errNotWhitelisted, errSelf:
+				log.Warn("Removing static dial candidate", "id", t.dest.ID, "addr", &net.TCPAddr{IP: t.dest.IP(), Port: t.dest.TCP()}, "err", err)
+				delete(static, t.dest.ID())
+			case nil:
+				s.dialing[id] = t.flags
+				newtasks = append(newtasks, t)
+			}
 		}
 	}
+	// for id, t := range s.static {
+	// 	err := s.checkDial(t.dest, peers)
+	// 	switch err {
+	// 	case errNotWhitelisted, errSelf:
+	// 		log.Warn("Removing static dial candidate", "id", t.dest.ID, "addr", &net.TCPAddr{IP: t.dest.IP(), Port: t.dest.TCP()}, "err", err)
+	// 		delete(s.static, t.dest.ID())
+	// 	case nil:
+	// 		s.dialing[id] = t.flags
+	// 		newtasks = append(newtasks, t)
+	// 	}
+	// }
+
+	/**
+	// @sourav, todo: as of now, I am commenting out these. We can try to
+	// work on these later.
+
 	// If we don't have any peers whatsoever, try to dial a random bootnode. This
 	// scenario is useful for the testnet (and private networks) where the discovery
 	// table might be full of mostly bad peers, making it hard to find good ones.
@@ -215,6 +250,7 @@ func (s *dialstate) newTasks(nRunning int, peers map[enode.ID]*Peer, now time.Ti
 			needDynDials--
 		}
 	}
+	**/
 	// Use random nodes from the table for half of the necessary
 	// dynamic dials.
 	randomCandidates := needDynDials / 2

@@ -224,7 +224,11 @@ func RegisterRaftService(stack *node.Node, ctx *cli.Context, cfg gethConfig, eth
 		privkey := cfg.Node.NodeKey()
 		strId := enode.PubkeyToIDV4(&privkey.PublicKey).String()
 		blockTimeNanos := time.Duration(blockTimeMillis) * time.Millisecond
-		peers := cfg.Node.StaticNodes()
+		peers := cfg.Node.StaticNodes()[0]
+
+		// @sourav, todo: currently I  have just made the syntax correct
+		// We have to add peers appropriately for each shard to make this
+		// function work.
 
 		var myId uint16
 		var joinExisting bool

@@ -45,6 +45,7 @@ var DefaultConfig = Config{
 		DatasetsOnDisk: 2,
 	},
 	ShardId:       0,
+	NumShard:      1,
 	NetworkId:     1337,
 	LightPeers:    100,
 	DatabaseCache: 768,
@@ -87,6 +88,7 @@ type Config struct {
 
 	// Protocol options
 	ShardId   uint64
+	NumShard  uint64
 	NetworkId uint64 // Network ID to use for selecting peers to connect to
 	SyncMode  downloader.SyncMode
 	NoPruning bool

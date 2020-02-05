@@ -99,9 +99,10 @@ type Downloader struct {
 	mode SyncMode       // Synchronisation mode defining the strategy used (per sync cycle)
 	mux  *event.TypeMux // Event multiplexer to announce sync operation events
 
-	queue   *queue   // Scheduler for selecting the hashes to download
-	peers   *peerSet // Set of active peers from which download can proceed
-	stateDB ethdb.Database
+	queue       *queue // Scheduler for selecting the hashes to download
+	myshard     uint64
+	cousinPeers map[uint64]*peerSet
+	stateDB     ethdb.Database
 
 	rttEstimate   uint64 // Round trip time to target for download requests
 	rttConfidence uint64 // Confidence in the estimated RTT (unit: millionths to allow atomic ops)
@@ -201,7 +202,7 @@ type BlockChain interface {
 }
 
 // New creates a new downloader to fetch hashes and blocks from remote peers.
-func New(mode SyncMode, stateDb ethdb.Database, mux *event.TypeMux, chain BlockChain, lightchain LightChain, dropPeer peerDropFn) *Downloader {
+func New(mode SyncMode, stateDb ethdb.Database, mux *event.TypeMux, chain BlockChain, lightchain LightChain, dropPeer peerDropFn, myshard uint64) *Downloader {
 	if lightchain == nil {
 		lightchain = chain
 	}
@@ -211,7 +212,8 @@ func New(mode SyncMode, stateDb ethdb.Database, mux *event.TypeMux, chain BlockC
 		stateDB:        stateDb,
 		mux:            mux,
 		queue:          newQueue(),
-		peers:          newPeerSet(),
+		myshard:        myshard,
+		cousinPeers:    make(map[uint64]*peerSet),
 		rttEstimate:    uint64(rttMaxEstimate),
 		rttConfidence:  uint64(1000000),
 		blockchain:     chain,
@@ -276,18 +278,35 @@ func (d *Downloader) Synchronising() bool {
 func (d *Downloader) RegisterPeer(id string, version int, peer Peer) error {
 	logger := log.New("peer", id)
 	logger.Trace("Registering sync peer")
-	if err := d.peers.Register(newPeerConnection(id, version, peer, logger)); err != nil {
+	peerShardID := peer.Shard()
+
+	// Initializing cousinPeers for each shard
+	if d.cousinPeers[peerShardID] == nil {
+		d.cousinPeers[peerShardID] = newPeerSet()
+	}
+	if err := d.cousinPeers[peerShardID].Register(newPeerConnection(id, version, peer, logger)); err != nil {
 		logger.Error("Failed to register sync peer", "err", err)
 		return err
 	}
 	d.qosReduceConfidence()
-
 	return nil
 }
 
 // RegisterLightPeer injects a light client peer, wrapping it so it appears as a regular peer.
-func (d *Downloader) RegisterLightPeer(id string, version int, peer LightPeer) error {
-	return d.RegisterPeer(id, version, &lightPeerWrapper{peer})
+// func (d *Downloader) RegisterLightPeer(shardID uint64, id string, version int, peer LightPeer) error {
+// 	return d.RegisterPeer(shardID, id, version, &lightPeerWrapper{peer})
+// }
+
+// GetShardID returns the shard number of a peer
+func (d *Downloader) GetShardID(id string) uint64 {
+	for shard, pset := range d.cousinPeers {
+		for peerID := range pset.peers {
+			if id == peerID {
+				return shard
+			}
+		}
+	}
+	return 4096
 }
 
 // UnregisterPeer remove a peer from the known list, preventing any action from
@@ -297,7 +316,8 @@ func (d *Downloader) UnregisterPeer(id string) error {
 	// Unregister the peer from the active peer set and revoke any fetch tasks
 	logger := log.New("peer", id)
 	logger.Trace("Unregistering sync peer")
-	if err := d.peers.Unregister(id); err != nil {
+	shardID := d.GetShardID(id)
+	if err := d.cousinPeers[shardID].Unregister(id); err != nil {
 		logger.Error("Failed to unregister sync peer", "err", err)
 		return err
 	}
@@ -361,7 +381,9 @@ func (d *Downloader) synchronise(id string, hash common.Hash, td *big.Int, mode 
 	}
 	// Reset the queue, peer set and wake channels to clean any internal leftover state
 	d.queue.Reset()
-	d.peers.Reset()
+	for _, peers := range d.cousinPeers {
+		peers.Reset()
+	}
 
 	for _, ch := range []chan bool{d.bodyWakeCh, d.receiptWakeCh} {
 		select {
@@ -397,7 +419,8 @@ func (d *Downloader) synchronise(id string, hash common.Hash, td *big.Int, mode 
 	d.mode = mode
 
 	// Retrieve the origin peer and initiate the downloading process
-	p := d.peers.Peer(id)
+	shardID := d.GetShardID(id)
+	p := d.cousinPeers[shardID].Peer(id)
 	if p == nil {
 		return errUnknownPeer
 	}
@@ -960,7 +983,7 @@ func (d *Downloader) fillHeaderSkeleton(from uint64, skeleton []*types.Header) (
 	)
 	err := d.fetchParts(errCancelHeaderFetch, d.headerCh, deliver, d.queue.headerContCh, expire,
 		d.queue.PendingHeaders, d.queue.InFlightHeaders, throttle, reserve,
-		nil, fetch, d.queue.CancelHeaders, capacity, d.peers.HeaderIdlePeers, setIdle, "headers")
+		nil, fetch, d.queue.CancelHeaders, capacity, d.cousinPeers[d.myshard].HeaderIdlePeers, setIdle, "headers")
 
 	log.Debug("Skeleton fill terminated", "err", err)
 
@@ -986,7 +1009,7 @@ func (d *Downloader) fetchBodies(from uint64) error {
 	)
 	err := d.fetchParts(errCancelBodyFetch, d.bodyCh, deliver, d.bodyWakeCh, expire,
 		d.queue.PendingBlocks, d.queue.InFlightBlocks, d.queue.ShouldThrottleBlocks, d.queue.ReserveBodies,
-		d.bodyFetchHook, fetch, d.queue.CancelBodies, capacity, d.peers.BodyIdlePeers, setIdle, "bodies")
+		d.bodyFetchHook, fetch, d.queue.CancelBodies, capacity, d.cousinPeers[d.myshard].BodyIdlePeers, setIdle, "bodies")
 
 	log.Debug("Block body download terminated", "err", err)
 	return err
@@ -1010,7 +1033,7 @@ func (d *Downloader) fetchReceipts(from uint64) error {
 	)
 	err := d.fetchParts(errCancelReceiptFetch, d.receiptCh, deliver, d.receiptWakeCh, expire,
 		d.queue.PendingReceipts, d.queue.InFlightReceipts, d.queue.ShouldThrottleReceipts, d.queue.ReserveReceipts,
-		d.receiptFetchHook, fetch, d.queue.CancelReceipts, capacity, d.peers.ReceiptIdlePeers, setIdle, "receipts")
+		d.receiptFetchHook, fetch, d.queue.CancelReceipts, capacity, d.cousinPeers[d.myshard].ReceiptIdlePeers, setIdle, "receipts")
 
 	log.Debug("Transaction receipt download terminated", "err", err)
 	return err
@@ -1062,7 +1085,7 @@ func (d *Downloader) fetchParts(errCancel error, deliveryCh chan dataPack, deliv
 		case packet := <-deliveryCh:
 			// If the peer was previously banned and failed to deliver its pack
 			// in a reasonable time frame, ignore its message.
-			if peer := d.peers.Peer(packet.PeerId()); peer != nil {
+			if peer := d.cousinPeers[d.myshard].Peer(packet.PeerId()); peer != nil {
 				// Deliver the received chunk of data and check chain validity
 				accepted, err := deliver(packet)
 				if err == errInvalidChain {
@@ -1110,12 +1133,12 @@ func (d *Downloader) fetchParts(errCancel error, deliveryCh chan dataPack, deliv
 
 		case <-update:
 			// Short circuit if we lost all our peers
-			if d.peers.Len() == 0 {
+			if d.cousinPeers[d.myshard].Len() == 0 {
 				return errNoPeers
 			}
 			// Check for fetch request timeouts and demote the responsible peers
 			for pid, fails := range expire() {
-				if peer := d.peers.Peer(pid); peer != nil {
+				if peer := d.cousinPeers[d.myshard].Peer(pid); peer != nil {
 					// If a lot of retrieval elements expired, we might have overestimated the remote peer or perhaps
 					// ourselves. Only reset to minimal throughput but don't drop just yet. If even the minimal times
 					// out that sync wise we need to get rid of the peer.
@@ -1618,7 +1641,10 @@ func (d *Downloader) deliver(id string, destCh chan dataPack, packet dataPack, i
 func (d *Downloader) qosTuner() {
 	for {
 		// Retrieve the current median RTT and integrate into the previoust target RTT
-		rtt := time.Duration((1-qosTuningImpact)*float64(atomic.LoadUint64(&d.rttEstimate)) + qosTuningImpact*float64(d.peers.medianRTT()))
+		if d.cousinPeers[d.myshard] == nil {
+			d.cousinPeers[d.myshard] = newPeerSet()
+		}
+		rtt := time.Duration((1-qosTuningImpact)*float64(atomic.LoadUint64(&d.rttEstimate)) + qosTuningImpact*float64(d.cousinPeers[d.myshard].medianRTT()))
 		atomic.StoreUint64(&d.rttEstimate, uint64(rtt))
 
 		// A new RTT cycle passed, increase our confidence in the estimated RTT
@@ -1640,7 +1666,7 @@ func (d *Downloader) qosTuner() {
 // peer set, needing to reduce the confidence we have in out QoS estimates.
 func (d *Downloader) qosReduceConfidence() {
 	// If we have a single peer, confidence is always 1
-	peers := uint64(d.peers.Len())
+	peers := uint64(d.cousinPeers[d.myshard].Len())
 	if peers == 0 {
 		// Ensure peer connectivity races don't catch us off guard
 		return
