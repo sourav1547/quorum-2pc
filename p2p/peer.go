@@ -467,7 +467,7 @@ func (p *Peer) Info() *PeerInfo {
 	// Gather all the running protocol infos
 	for _, proto := range p.running {
 		protoInfo := interface{}("unknown")
-		if query := proto.Protocol.PeerInfo; query != nil {
+		if query := proto.Protocol.CousinPeerInfo; query != nil {
 			if metadata := query(p.ID()); metadata != nil {
 				protoInfo = metadata
 			} else {

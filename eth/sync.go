@@ -145,6 +145,9 @@ func (pm *ProtocolManager) syncer() {
 		select {
 		case <-pm.newPeerCh:
 			// Make sure we have peers to select from, then sync
+			if pm.cousinPeers[pm.myshard] == nil {
+				pm.cousinPeers[pm.myshard] = newPeerSet()
+			}
 			if pm.cousinPeers[pm.myshard].Len() < minDesiredPeerCount {
 				break
 			}
@@ -154,6 +157,9 @@ func (pm *ProtocolManager) syncer() {
 
 		case <-forceSync.C:
 			if !pm.raftMode {
+				if pm.cousinPeers[pm.myshard] == nil {
+					pm.cousinPeers[pm.myshard] = newPeerSet()
+				}
 				// Force a sync even if not enough peers are present
 				go pm.synchronise(pm.cousinPeers[pm.myshard].BestPeer())
 			}

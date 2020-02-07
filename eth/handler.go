@@ -154,7 +154,7 @@ func NewProtocolManager(config *params.ChainConfig, mode downloader.SyncMode, nu
 			Version: version,
 			Length:  protocol.Lengths[i],
 			Run: func(p *p2p.Peer, rw p2p.MsgReadWriter) error {
-				peer := manager.newPeer(myshard, int(version), p, rw)
+				peer := manager.newPeer(int(version), p, rw)
 				select {
 				case manager.newPeerCh <- peer:
 					manager.wg.Add(1)
@@ -167,33 +167,14 @@ func NewProtocolManager(config *params.ChainConfig, mode downloader.SyncMode, nu
 			NodeInfo: func() interface{} {
 				return manager.NodeInfo()
 			},
-			// PeerInfo: func(id enode.ID) interface{} {
-			// 	if p := manager.peers.Peer(fmt.Sprintf("%x", id[:8])); p != nil {
-			// 		return p.Info()
-			// 	}
-			// 	return nil
-			// },
 			CousinPeerInfo: func(id enode.ID) interface{} {
 				for _, peers := range manager.cousinPeers {
 					if p := peers.Peer(fmt.Sprintf("%x", id[:8])); p != nil {
 						return p.Info()
 					}
 				}
-				// i := uint64(0)
-				// for i < numShard {
-				// 	if p := manager.cousinPeers.Peer(i, fmt.Sprintf("%x", id[:8])); p != nil {
-				// 		return p.Info()
-				// 	}
-				// 	i = i + 1
-				// }
 				return nil
 			},
-			// RefPeerInfo: func(id enode.ID) interface{} {
-			// 	if p := manager.refPeers.Peer(fmt.Sprintf("%x", id[:8])); p != nil {
-			// 		return p.Info()
-			// 	}
-			// 	return nil
-			// },
 		})
 	}
 	if len(manager.SubProtocols) == 0 {
@@ -324,8 +305,9 @@ func (pm *ProtocolManager) Stop() {
 	log.Info("Ethereum protocol stopped")
 }
 
-func (pm *ProtocolManager) newPeer(myshard uint64, pv int, p *p2p.Peer, rw p2p.MsgReadWriter) *peer {
-	return newPeer(myshard, pv, p, newMeteredMsgWriter(rw))
+func (pm *ProtocolManager) newPeer(pv int, p *p2p.Peer, rw p2p.MsgReadWriter) *peer {
+	shard := pm.GetShardID(p.ID().String())
+	return newPeer(shard, pv, p, newMeteredMsgWriter(rw))
 }
 
 // handle is the callback invoked to manage the life cycle of an eth peer. When
@@ -934,6 +916,9 @@ func (pm *ProtocolManager) getConsensusAlgorithm() string {
 
 func (self *ProtocolManager) FindPeers(targets map[common.Address]bool) map[common.Address]consensus.Peer {
 	m := make(map[common.Address]consensus.Peer)
+	if self.cousinPeers[self.myshard] == nil {
+		return m
+	}
 	for _, p := range self.cousinPeers[self.myshard].Peers() {
 		pubKey := p.Node().Pubkey()
 		addr := crypto.PubkeyToAddress(*pubKey)

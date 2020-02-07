@@ -68,6 +68,7 @@ func (ist *IstanbulExtra) DecodeRLP(s *rlp.Stream) error {
 // ExtractIstanbulExtra extracts all values of the IstanbulExtra from the header. It returns an
 // error if the length of the given extra-data is less than 32 bytes or the extra-data can not
 // be decoded.
+// @sourav, todo: reformat this appropriately to allow sharded validators
 func ExtractIstanbulExtra(h *Header) (*IstanbulExtra, error) {
 	if len(h.Extra) < IstanbulExtraVanity {
 		return nil, ErrInvalidIstanbulHeaderExtra

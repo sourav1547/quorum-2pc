@@ -746,7 +746,6 @@ func (srv *Server) run(dialstate dialer) {
 		queuedTasks = append(queuedTasks[:0], startTasks(queuedTasks)...)
 		// Query dialer for new tasks and start as many as possible now.
 		if len(runningTasks) < maxActiveDialTasks {
-			srv.log.Info("Scheduling task", "cousinPeers", cousinPeers)
 			nt := dialstate.newTasks(len(runningTasks)+len(queuedTasks), cousinPeers, time.Now())
 			queuedTasks = append(queuedTasks, startTasks(nt)...)
 		}

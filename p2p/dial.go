@@ -141,19 +141,11 @@ func newDialState(self enode.ID, static map[uint64][]*enode.Node, bootnodes []*e
 	copy(s.bootnodes, bootnodes)
 	for shard, nodeList := range static {
 		for _, n := range nodeList {
-			log.Info("Inside newDialState", "shard", shard, "node", n)
 			s.addStatic(shard, n)
 		}
 	}
 	return s
 }
-
-// func (s *dialstate) addStaticAll(shard uint64, n *enode.Node) {
-// 	if s.staticAll[shard] == nil {
-// 		s.staticAll[shard] = make(map[enode.ID]*dialTask)
-// 	}
-// 	s.staticAll[shard][n.ID()] = &dialTask{flags: staticDialedConn, dest: n}
-// }
 
 func (s *dialstate) addStatic(shard uint64, n *enode.Node) {
 	// This overwrites the task instead of updating an existing
