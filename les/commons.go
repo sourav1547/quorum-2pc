@@ -60,7 +60,7 @@ func (c *lesCommons) makeProtocols(versions []uint) []p2p.Protocol {
 			Version:  version,
 			Length:   ProtocolLengths[version],
 			NodeInfo: c.nodeInfo,
-			Run: func(p *p2p.Peer, rw p2p.MsgReadWriter) error {
+			Run: func(p *p2p.Peer, shard uint64, rw p2p.MsgReadWriter) error {
 				return c.protocolManager.runPeer(version, p, rw)
 			},
 			CousinPeerInfo: func(id enode.ID) interface{} {

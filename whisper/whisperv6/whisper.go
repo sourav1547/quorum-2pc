@@ -646,7 +646,10 @@ func (whisper *Whisper) Stop() error {
 
 // HandlePeer is called by the underlying P2P layer when the whisper sub-protocol
 // connection is negotiated.
-func (whisper *Whisper) HandlePeer(peer *p2p.Peer, rw p2p.MsgReadWriter) error {
+// @sourav, major todo: double check this.
+// here we might have to maintain different peer list for
+// each shard.
+func (whisper *Whisper) HandlePeer(peer *p2p.Peer, shard uint64, rw p2p.MsgReadWriter) error {
 	// Create the new peer and start tracking it
 	whisperPeer := newPeer(whisper, peer, rw)
 

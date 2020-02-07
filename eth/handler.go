@@ -153,8 +153,8 @@ func NewProtocolManager(config *params.ChainConfig, mode downloader.SyncMode, nu
 			Name:    protocol.Name,
 			Version: version,
 			Length:  protocol.Lengths[i],
-			Run: func(p *p2p.Peer, rw p2p.MsgReadWriter) error {
-				peer := manager.newPeer(int(version), p, rw)
+			Run: func(p *p2p.Peer, shard uint64, rw p2p.MsgReadWriter) error {
+				peer := manager.newPeer(shard, int(version), p, rw)
 				select {
 				case manager.newPeerCh <- peer:
 					manager.wg.Add(1)
@@ -203,22 +203,10 @@ func NewProtocolManager(config *params.ChainConfig, mode downloader.SyncMode, nu
 	return manager, nil
 }
 
-// GetShardID returns the shard of a peer
-func (pm *ProtocolManager) GetShardID(id string) uint64 {
-	for shard, peers := range pm.cousinPeers {
-		for p := range peers.peers {
-			if id == p {
-				return shard
-			}
-		}
-	}
-	return uint64(4096)
-}
-
 func (pm *ProtocolManager) removePeer(id string) {
 	// Short circuit if the peer was already removed
-	peerShard := pm.GetShardID(id)
-	peer := pm.cousinPeers[peerShard].Peer(id)
+	// @sourav, todo: here we are removing from our shard. Fix this
+	peer := pm.cousinPeers[pm.myshard].Peer(id)
 	if peer == nil {
 		return
 	}
@@ -226,7 +214,7 @@ func (pm *ProtocolManager) removePeer(id string) {
 
 	// Unregister the peer from the downloader and Ethereum peer set
 	pm.downloader.UnregisterPeer(id)
-	if err := pm.cousinPeers[peerShard].Unregister(id); err != nil {
+	if err := pm.cousinPeers[pm.myshard].Unregister(id); err != nil {
 		log.Error("Peer removal failed", "peer", id, "err", err)
 	}
 	// Hard disconnect at the networking layer
@@ -234,23 +222,6 @@ func (pm *ProtocolManager) removePeer(id string) {
 		peer.Peer.Disconnect(p2p.DiscUselessPeer)
 	}
 }
-
-// // @sourav, todo: Merge this with removePeer function for modularity
-// func (pm *ProtocolManager) removeCousinPeer(shard uint64, id string) {
-// 	cpeer := pm.cousinPeers[shard].Peer(id)
-// 	if cpeer == nil {
-// 		return
-// 	}
-// 	log.Debug("Removing a cousing peer", "cpeer", id)
-// 	pm.downloader.UnregisterPeer(id)
-// 	if err := pm.cousinPeers[shard].Unregister(id); err != nil {
-// 		log.Error("Cousin Peer removal failed", "cpeer", id, "err", err)
-// 	}
-
-// 	if cpeer != nil {
-// 		cpeer.Peer.Disconnect(p2p.DiscUselessPeer)
-// 	}
-// }
 
 func (pm *ProtocolManager) Start(maxPeers int) {
 	pm.maxPeers = maxPeers
@@ -305,8 +276,7 @@ func (pm *ProtocolManager) Stop() {
 	log.Info("Ethereum protocol stopped")
 }
 
-func (pm *ProtocolManager) newPeer(pv int, p *p2p.Peer, rw p2p.MsgReadWriter) *peer {
-	shard := pm.GetShardID(p.ID().String())
+func (pm *ProtocolManager) newPeer(shard uint64, pv int, p *p2p.Peer, rw p2p.MsgReadWriter) *peer {
 	return newPeer(shard, pv, p, newMeteredMsgWriter(rw))
 }
 

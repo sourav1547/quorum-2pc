@@ -73,7 +73,7 @@ func NewPingProtocol(ping *Ping) *p2p.Protocol {
 		Name:    PingProtocol.Name,
 		Version: PingProtocol.Version,
 		Length:  uint64(PingProtocol.MaxMsgSize),
-		Run: func(p *p2p.Peer, rw p2p.MsgReadWriter) error {
+		Run: func(p *p2p.Peer, shard uint64, rw p2p.MsgReadWriter) error {
 			quitC := make(chan struct{})
 			pp := protocols.NewPeer(p, rw, PingProtocol)
 			log.Trace("running pss vprotocol", "peer", p, "outc", ping.OutC)
