@@ -42,28 +42,12 @@ type IstanbulExtra struct {
 	CommittedSeal [][]byte
 }
 
-// IstanbulExtraAll stores validator information about all shards
-type IstanbulExtraAll struct {
-	ValidatorsAll map[uint64][]common.Address
-	Seal          []byte
-	CommittedSeal [][]byte
-}
-
 // EncodeRLP serializes ist into the Ethereum RLP format.
 func (ist *IstanbulExtra) EncodeRLP(w io.Writer) error {
 	return rlp.Encode(w, []interface{}{
 		ist.Validators,
 		ist.Seal,
 		ist.CommittedSeal,
-	})
-}
-
-// EncodeRLP to encode the genesis block
-func (ista *IstanbulExtraAll) EncodeRLP(w io.Writer) error {
-	return rlp.Encode(w, []interface{}{
-		ista.ValidatorsAll,
-		ista.Seal,
-		ista.CommittedSeal,
 	})
 }
 
@@ -81,21 +65,6 @@ func (ist *IstanbulExtra) DecodeRLP(s *rlp.Stream) error {
 	return nil
 }
 
-// DecodeRLP is to decode the genesis block
-func (ista *IstanbulExtraAll) DecodeRLP(s *rlp.Stream) error {
-	var istanbulExtraAll struct {
-		ValidatorsAll map[uint64][]common.Address
-		Seal          []byte
-		CommittedSeal [][]byte
-	}
-
-	if err := s.Decode(&istanbulExtraAll); err != nil {
-		return err
-	}
-	ista.ValidatorsAll, ista.Seal, ista.CommittedSeal = istanbulExtraAll.ValidatorsAll, istanbulExtraAll.Seal, istanbulExtraAll.CommittedSeal
-	return nil
-}
-
 // ExtractIstanbulExtra extracts all values of the IstanbulExtra from the header. It returns an
 // error if the length of the given extra-data is less than 32 bytes or the extra-data can not
 // be decoded.
@@ -110,21 +79,6 @@ func ExtractIstanbulExtra(h *Header) (*IstanbulExtra, error) {
 		return nil, err
 	}
 	return istanbulExtra, nil
-}
-
-// ExtractIstanbulExtraAll extracts vall values of IstanbulExtraAll from
-// the header. Used only during intialization.
-func ExtractIstanbulExtraAll(h *Header) (*IstanbulExtraAll, error) {
-	if len(h.Extra) < IstanbulExtraVanity {
-		return nil, ErrInvalidIstanbulHeaderExtra
-	}
-
-	var istanbulExtraAll *IstanbulExtraAll
-	err := rlp.DecodeBytes(h.Extra[IstanbulExtraVanity:], &istanbulExtraAll)
-	if err != nil {
-		return nil, err
-	}
-	return istanbulExtraAll, nil
 }
 
 // IstanbulFilteredHeader returns a filtered header which some information (like seal, committed seals)

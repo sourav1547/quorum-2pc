@@ -49,3 +49,6 @@ profile.cov
 
 # QUORUM
 generated-release-notes.md
+
+#ISTANBUL TOOLS
+istanbul-tools/build/

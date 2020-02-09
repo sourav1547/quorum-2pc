@@ -33,19 +33,3 @@ func Decode(extraData string) ([]byte, *types.IstanbulExtra, error) {
 	}
 	return extra[:types.IstanbulExtraVanity], istanbulExtra, nil
 }
-
-// DecodeAll to decode information about validators of each shard, used only
-// for genesis block
-// @sourav, todo: double check whether this is needed or not.
-func DecodeAll(extraData string) ([]byte, *types.IstanbulExtraAll, error) {
-	extra, err := hexutil.Decode(extraData)
-	if err != nil {
-		return nil, nil, err
-	}
-
-	istanbulExtraAll, err := types.ExtractIstanbulExtraAll(&types.Header{Extra: extra})
-	if err != nil {
-		return nil, nil, err
-	}
-	return extra[:types.IstanbulExtraVanity], istanbulExtraAll, nil
-}

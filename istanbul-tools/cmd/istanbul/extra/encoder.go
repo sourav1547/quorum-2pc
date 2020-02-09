@@ -49,28 +49,3 @@ func Encode(vanity string, validators []common.Address) (string, error) {
 
 	return "0x" + common.Bytes2Hex(append(newVanity, payload...)), nil
 }
-
-func EncodeAll(vanity string, validatorsAll map[uint64][]common.Address) (string, error) {
-	newVanity, err := hexutil.Decode(vanity)
-	if err != nil {
-		return "", err
-	}
-
-	if len(newVanity) < atypes.IstanbulExtraVanity {
-		newVanity = append(newVanity, bytes.Repeat([]byte{0x00},
-			atypes.IstanbulExtraVanity-len(newVanity))...)
-	}
-
-	ista := &atypes.IstanbulExtraAll{
-		ValidatorsAll: validatorsAll,
-		Seal:          make([]byte, atypes.IstanbulExtraSeal),
-		CommittedSeal: [][]byte{},
-	}
-
-	payload, err := rlp.EncodeToBytes(&ista)
-	if err != nil {
-		return "", err
-	}
-
-	return "0x" + common.Bytes2Hex(append(newVanity, payload...)), nil
-}

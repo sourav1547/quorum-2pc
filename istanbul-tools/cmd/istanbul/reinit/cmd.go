@@ -115,7 +115,7 @@ func getGenesisWithAddrs(addrs []common.Address, isQuorum bool) ([]byte, error) 
 	return jsonBytes, err
 }
 
-func appendValidators(genesis *core.Genesis, addrs map[uint64][]common.Address) {
+func appendValidators(genesis *core.Genesis, addrs []common.Address) {
 
 	if len(genesis.ExtraData) < types.IstanbulExtraVanity {
 		genesis.ExtraData = append(genesis.ExtraData, bytes.Repeat([]byte{0x00}, types.IstanbulExtraVanity)...)

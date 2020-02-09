@@ -33,11 +33,13 @@ import (
 )
 
 // New creates an Istanbul consensus core
-func New(backend istanbul.Backend, config *istanbul.Config, myShard uint64) Engine {
+func New(backend istanbul.Backend, config *istanbul.Config, myShard, numShard uint64) Engine {
 	r := metrics.NewRegistry()
 	c := &core{
 		config:             config,
 		myShard:            myShard,
+		numShard:           numShard,
+		valSetAll:          make(map[uint64][]common.Address),
 		address:            backend.Address(),
 		state:              StateAcceptRequest,
 		handlerWg:          new(sync.WaitGroup),
@@ -64,11 +66,12 @@ func New(backend istanbul.Backend, config *istanbul.Config, myShard uint64) Engi
 // ----------------------------------------------------------------------------
 
 type core struct {
-	config  *istanbul.Config
-	myShard uint64
-	address common.Address
-	state   State
-	logger  log.Logger
+	config   *istanbul.Config
+	myShard  uint64
+	numShard uint64
+	address  common.Address
+	state    State
+	logger   log.Logger
 
 	backend               istanbul.Backend
 	events                *event.TypeMuxSubscription
@@ -77,7 +80,7 @@ type core struct {
 	futurePreprepareTimer *time.Timer
 
 	valSet                istanbul.ValidatorSet
-	valSetAll             map[uint64]istanbul.ValidatorSet
+	valSetAll             map[uint64][]common.Address
 	waitingForRoundChange bool
 	validateFn            func([]byte, []byte) (common.Address, error)
 
@@ -100,6 +103,20 @@ type core struct {
 	sequenceMeter metrics.Meter
 	// the timer to record consensus duration (from accepting a preprepare to final committed stage)
 	consensusTimer metrics.Timer
+}
+
+func (c *core) SetAllValidators(validators []common.Address) {
+	totalValidators := uint64(len(validators))
+	// numShard := int(c.numShard)
+	// myShard := int(c.myShard)
+	validatorsPerShard := totalValidators / c.numShard
+
+	for i := uint64(0); i < c.numShard; i++ {
+		c.valSetAll[i] = []common.Address{}
+		for j := uint64(0); j < validatorsPerShard; j++ {
+			c.valSetAll[i] = append(c.valSetAll[i], validators[i*validatorsPerShard+j])
+		}
+	}
 }
 
 func (c *core) finalizeMessage(msg *message) ([]byte, error) {
@@ -153,7 +170,7 @@ func (c *core) broadcast(shard uint64, msg *message) {
 			return
 		}
 	} else {
-		if err = c.backend.Broadcast(c.valSetAll[shard], payload); err != nil {
+		if err = c.backend.BroadcastOthers(c.valSetAll[shard], payload); err != nil {
 			logger.Error("Failed to broadcast message to", "shard", shard, "msg", msg, "err", err)
 			return
 		}
@@ -199,6 +216,7 @@ func (c *core) commit() {
 }
 
 // startNewRound starts a new round. if round equals to 0, it means to starts a new sequence
+// @sourav, todo: potential starting point.
 func (c *core) startNewRound(round *big.Int) {
 	var logger log.Logger
 	if c.current == nil {

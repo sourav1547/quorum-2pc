@@ -97,8 +97,8 @@ func gen(ctx *cli.Context) error {
 		}
 		nodePort = nodePort + nodePortIncrement
 
-		if (i+1)%nodesPerShard == 0 {
-			nodes = append(nodes, "shard:"+strconv.Itoa((i+1)/nodesPerShard))
+		if i%nodesPerShard == 0 {
+			nodes = append(nodes, "shard:"+strconv.Itoa(i/nodesPerShard))
 		}
 		nodes = append(nodes, string(v.NodeInfo))
 

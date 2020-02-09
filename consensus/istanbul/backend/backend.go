@@ -42,7 +42,7 @@ const (
 )
 
 // New creates an Ethereum backend for Istanbul core engine.
-func New(config *istanbul.Config, privateKey *ecdsa.PrivateKey, myShard uint64, db ethdb.Database) consensus.Istanbul {
+func New(config *istanbul.Config, privateKey *ecdsa.PrivateKey, myShard, numShard uint64, db ethdb.Database) consensus.Istanbul {
 	// Allocate the snapshot caches and create the engine
 	recents, _ := lru.NewARC(inmemorySnapshots)
 	recentMessages, _ := lru.NewARC(inmemoryPeers)
@@ -50,6 +50,7 @@ func New(config *istanbul.Config, privateKey *ecdsa.PrivateKey, myShard uint64, 
 	backend := &backend{
 		config:           config,
 		myShard:          myShard,
+		numShard:         numShard,
 		istanbulEventMux: new(event.TypeMux),
 		privateKey:       privateKey,
 		address:          crypto.PubkeyToAddress(privateKey.PublicKey),
@@ -62,7 +63,7 @@ func New(config *istanbul.Config, privateKey *ecdsa.PrivateKey, myShard uint64, 
 		recentMessages:   recentMessages,
 		knownMessages:    knownMessages,
 	}
-	backend.core = istanbulCore.New(backend, backend.config, myShard)
+	backend.core = istanbulCore.New(backend, backend.config, myShard, numShard)
 	return backend
 }
 
@@ -71,6 +72,7 @@ func New(config *istanbul.Config, privateKey *ecdsa.PrivateKey, myShard uint64, 
 type backend struct {
 	config           *istanbul.Config
 	myShard          uint64
+	numShard         uint64
 	istanbulEventMux *event.TypeMux
 	privateKey       *ecdsa.PrivateKey
 	address          common.Address
@@ -112,6 +114,16 @@ func (sb *backend) Address() common.Address {
 	return sb.address
 }
 
+// NumShard returns the total number of shard
+func (sb *backend) NumShard() uint64 {
+	return sb.numShard
+}
+
+// MyShard returns local shard id
+func (sb *backend) MyShard() uint64 {
+	return sb.myShard
+}
+
 // Validators implements istanbul.Backend.Validators
 func (sb *backend) Validators(proposal istanbul.Proposal) istanbul.ValidatorSet {
 	return sb.getValidators(proposal.Number().Uint64(), proposal.Hash())
@@ -126,6 +138,39 @@ func (sb *backend) Broadcast(valSet istanbul.ValidatorSet, payload []byte) error
 		Payload: payload,
 	}
 	go sb.istanbulEventMux.Post(msg)
+	return nil
+}
+
+func (sb *backend) BroadcastOthers(valAddress []common.Address, payload []byte) error {
+	hash := istanbul.RLPHash(payload)
+	sb.knownMessages.Add(hash, true)
+
+	targets := make(map[common.Address]bool)
+	for _, addr := range valAddress {
+		targets[addr] = true
+	}
+
+	if sb.broadcaster != nil && len(targets) > 0 {
+		ps := sb.broadcaster.FindPeers(targets)
+		for addr, p := range ps {
+			ms, ok := sb.recentMessages.Get(addr)
+			var m *lru.ARCCache
+			if ok {
+				m, _ = ms.(*lru.ARCCache)
+				if _, k := m.Get(hash); k {
+					// This peer had this event, skip it
+					continue
+				}
+			} else {
+				m, _ = lru.NewARC(inmemoryMessages)
+			}
+
+			m.Add(hash, true)
+			sb.recentMessages.Add(addr, m)
+
+			go p.Send(istanbulMsg, payload)
+		}
+	}
 	return nil
 }
 

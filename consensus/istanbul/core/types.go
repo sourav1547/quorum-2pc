@@ -38,6 +38,9 @@ type Engine interface {
 	// pending request is populated right at the preprepare stage so this would give us the earliest verification
 	// to avoid any race condition of coming propagated blocks
 	IsCurrentProposal(blockHash common.Hash) bool
+
+	// SetAllValidators initializes with information of all validators
+	SetAllValidators(validators []common.Address)
 }
 
 type State uint64

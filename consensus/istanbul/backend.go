@@ -41,6 +41,9 @@ type Backend interface {
 	// Gossip sends a message to all validators (exclude self)
 	Gossip(valSet ValidatorSet, payload []byte) error
 
+	// BroadcastOthers sends messages to validators from the valAddresses
+	BroadcastOthers(valAddress []common.Address, payload []byte) error
+
 	// Commit delivers an approved proposal to backend.
 	// The delivered proposal will be put into blockchain.
 	Commit(proposal Proposal, seals [][]byte) error

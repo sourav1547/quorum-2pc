@@ -545,6 +545,7 @@ func (sb *backend) Stop() error {
 }
 
 // snapshot retrieves the authorization snapshot at a given point in time.
+// @sourav, initializing all validators
 func (sb *backend) snapshot(chain consensus.ChainReader, number uint64, hash common.Hash, parents []*types.Header) (*Snapshot, error) {
 	// Search for a snapshot in memory or on disk for checkpoints
 	var (
@@ -572,6 +573,14 @@ func (sb *backend) snapshot(chain consensus.ChainReader, number uint64, hash com
 				return nil, err
 			}
 			istanbulExtra, err := types.ExtractIstanbulExtra(genesis)
+			sb.core.SetAllValidators(istanbulExtra.Validators)
+
+			totalValidators := uint64(len(istanbulExtra.Validators))
+			validatorsPerShard := totalValidators / sb.numShard
+			lowIndex := sb.myShard * validatorsPerShard
+			highIndex := (1 + sb.myShard) * validatorsPerShard
+			istanbulExtra.Validators = istanbulExtra.Validators[lowIndex:highIndex]
+
 			if err != nil {
 				return nil, err
 			}
