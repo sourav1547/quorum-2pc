@@ -38,7 +38,7 @@ func (c *core) sendPreprepare(request *istanbul.Request) {
 			return
 		}
 
-		c.broadcast(&message{
+		c.broadcast(c.myShard, &message{
 			Code: msgPreprepare,
 			Msg:  preprepare,
 		})

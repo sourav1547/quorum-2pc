@@ -44,7 +44,7 @@ func (c *core) broadcastCommit(sub *istanbul.Subject) {
 		logger.Error("Failed to encode", "subject", sub)
 		return
 	}
-	c.broadcast(&message{
+	c.broadcast(c.myShard, &message{
 		Code: msgCommit,
 		Msg:  encodedSubject,
 	})

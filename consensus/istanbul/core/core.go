@@ -33,10 +33,11 @@ import (
 )
 
 // New creates an Istanbul consensus core
-func New(backend istanbul.Backend, config *istanbul.Config) Engine {
+func New(backend istanbul.Backend, config *istanbul.Config, myShard uint64) Engine {
 	r := metrics.NewRegistry()
 	c := &core{
 		config:             config,
+		myShard:            myShard,
 		address:            backend.Address(),
 		state:              StateAcceptRequest,
 		handlerWg:          new(sync.WaitGroup),
@@ -64,6 +65,7 @@ func New(backend istanbul.Backend, config *istanbul.Config) Engine {
 
 type core struct {
 	config  *istanbul.Config
+	myShard uint64
 	address common.Address
 	state   State
 	logger  log.Logger
@@ -75,6 +77,7 @@ type core struct {
 	futurePreprepareTimer *time.Timer
 
 	valSet                istanbul.ValidatorSet
+	valSetAll             map[uint64]istanbul.ValidatorSet
 	waitingForRoundChange bool
 	validateFn            func([]byte, []byte) (common.Address, error)
 
@@ -134,7 +137,7 @@ func (c *core) finalizeMessage(msg *message) ([]byte, error) {
 	return payload, nil
 }
 
-func (c *core) broadcast(msg *message) {
+func (c *core) broadcast(shard uint64, msg *message) {
 	logger := c.logger.New("state", c.state)
 
 	payload, err := c.finalizeMessage(msg)
@@ -144,9 +147,16 @@ func (c *core) broadcast(msg *message) {
 	}
 
 	// Broadcast payload
-	if err = c.backend.Broadcast(c.valSet, payload); err != nil {
-		logger.Error("Failed to broadcast message", "msg", msg, "err", err)
-		return
+	if shard == c.myShard {
+		if err = c.backend.Broadcast(c.valSet, payload); err != nil {
+			logger.Error("Failed to broadcast message inside local shard", "msg", msg, "err", err)
+			return
+		}
+	} else {
+		if err = c.backend.Broadcast(c.valSetAll[shard], payload); err != nil {
+			logger.Error("Failed to broadcast message to", "shard", shard, "msg", msg, "err", err)
+			return
+		}
 	}
 }
 

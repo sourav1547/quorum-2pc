@@ -31,7 +31,7 @@ func (c *core) sendPrepare() {
 		logger.Error("Failed to encode", "subject", sub)
 		return
 	}
-	c.broadcast(&message{
+	c.broadcast(c.myShard, &message{
 		Code: msgPrepare,
 		Msg:  encodedSubject,
 	})

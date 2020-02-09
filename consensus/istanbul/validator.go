@@ -75,6 +75,29 @@ type ValidatorSet interface {
 	Policy() ProposerPolicy
 }
 
+// ValidatorSetAll provides API to extract information about
+// validators from all shards
+/**
+type ValidatorSetAll interface {
+	// Return the validator size
+	Size(shard uint64) int
+	// Return the entire map of validator arrays
+	List() map[uint64][]Validator
+
+	// Get validators of a particular shard
+	GetValidtors(shard uint64) []Validator
+
+	// Get validator of a shard by its address
+	GetByAddress(shard uint64, addr common.Address) (int, Validator)
+
+	//Get validator of a shard by its index
+	GetByIndex(shard uint64, i uint64) Validator
+
+	// Get current proposer of a shard
+	GetProposer(shard uint64) Validator
+}
+**/
+
 // ----------------------------------------------------------------------------
 
 type ProposalSelector func(ValidatorSet, common.Address, uint64) Validator
