@@ -99,10 +99,11 @@ type Downloader struct {
 	mode SyncMode       // Synchronisation mode defining the strategy used (per sync cycle)
 	mux  *event.TypeMux // Event multiplexer to announce sync operation events
 
-	queue       *queue // Scheduler for selecting the hashes to download
-	myshard     uint64
-	cousinPeers map[uint64]*peerSet
-	stateDB     ethdb.Database
+	queue          *queue // Scheduler for selecting the hashes to download
+	myshard        uint64
+	cousinPeers    map[uint64]*peerSet
+	cousinPeerLock sync.RWMutex
+	stateDB        ethdb.Database
 
 	rttEstimate   uint64 // Round trip time to target for download requests
 	rttConfidence uint64 // Confidence in the estimated RTT (unit: millionths to allow atomic ops)
@@ -281,13 +282,18 @@ func (d *Downloader) RegisterPeer(id string, version int, peer Peer) error {
 	peerShardID := peer.Shard()
 
 	// Initializing cousinPeers for each shard
+	d.cousinPeerLock.Lock()
 	if d.cousinPeers[peerShardID] == nil {
 		d.cousinPeers[peerShardID] = newPeerSet()
 	}
+	d.cousinPeerLock.Unlock()
+	d.cousinPeerLock.RLock()
 	if err := d.cousinPeers[peerShardID].Register(newPeerConnection(id, version, peer, logger)); err != nil {
 		logger.Error("Failed to register sync peer", "err", err)
+		d.cousinPeerLock.RUnlock()
 		return err
 	}
+	d.cousinPeerLock.RUnlock()
 	d.qosReduceConfidence()
 	return nil
 }
@@ -299,6 +305,8 @@ func (d *Downloader) RegisterPeer(id string, version int, peer Peer) error {
 
 // GetShardID returns the shard number of a peer
 func (d *Downloader) GetShardID(id string) uint64 {
+	d.cousinPeerLock.RLock()
+	defer d.cousinPeerLock.RUnlock()
 	for shard, pset := range d.cousinPeers {
 		for peerID := range pset.peers {
 			if id == peerID {
@@ -317,10 +325,13 @@ func (d *Downloader) UnregisterPeer(id string) error {
 	logger := log.New("peer", id)
 	logger.Trace("Unregistering sync peer")
 	shardID := d.GetShardID(id)
+	d.cousinPeerLock.Lock()
 	if err := d.cousinPeers[shardID].Unregister(id); err != nil {
 		logger.Error("Failed to unregister sync peer", "err", err)
+		d.cousinPeerLock.Unlock()
 		return err
 	}
+	d.cousinPeerLock.Unlock()
 	d.queue.Revoke(id)
 
 	// If this peer was the master peer, abort sync immediately
@@ -381,9 +392,11 @@ func (d *Downloader) synchronise(id string, hash common.Hash, td *big.Int, mode 
 	}
 	// Reset the queue, peer set and wake channels to clean any internal leftover state
 	d.queue.Reset()
+	d.cousinPeerLock.Lock()
 	for _, peers := range d.cousinPeers {
 		peers.Reset()
 	}
+	d.cousinPeerLock.Unlock()
 
 	for _, ch := range []chan bool{d.bodyWakeCh, d.receiptWakeCh} {
 		select {
@@ -420,7 +433,9 @@ func (d *Downloader) synchronise(id string, hash common.Hash, td *big.Int, mode 
 
 	// Retrieve the origin peer and initiate the downloading process
 	shardID := d.GetShardID(id)
+	d.cousinPeerLock.RLock()
 	p := d.cousinPeers[shardID].Peer(id)
+	d.cousinPeerLock.RUnlock()
 	if p == nil {
 		return errUnknownPeer
 	}
@@ -1085,7 +1100,9 @@ func (d *Downloader) fetchParts(errCancel error, deliveryCh chan dataPack, deliv
 		case packet := <-deliveryCh:
 			// If the peer was previously banned and failed to deliver its pack
 			// in a reasonable time frame, ignore its message.
+			d.cousinPeerLock.RLock()
 			if peer := d.cousinPeers[d.myshard].Peer(packet.PeerId()); peer != nil {
+				d.cousinPeerLock.RUnlock()
 				// Deliver the received chunk of data and check chain validity
 				accepted, err := deliver(packet)
 				if err == errInvalidChain {
@@ -1106,6 +1123,8 @@ func (d *Downloader) fetchParts(errCancel error, deliveryCh chan dataPack, deliv
 				default:
 					peer.log.Trace("Failed to deliver retrieved data", "type", kind, "err", err)
 				}
+			} else {
+				d.cousinPeerLock.RUnlock()
 			}
 			// Blocks assembled, try to update the progress
 			select {
@@ -1641,10 +1660,15 @@ func (d *Downloader) deliver(id string, destCh chan dataPack, packet dataPack, i
 func (d *Downloader) qosTuner() {
 	for {
 		// Retrieve the current median RTT and integrate into the previoust target RTT
+		d.cousinPeerLock.Lock()
 		if d.cousinPeers[d.myshard] == nil {
 			d.cousinPeers[d.myshard] = newPeerSet()
 		}
+		d.cousinPeerLock.Unlock()
+
+		d.cousinPeerLock.RLock()
 		rtt := time.Duration((1-qosTuningImpact)*float64(atomic.LoadUint64(&d.rttEstimate)) + qosTuningImpact*float64(d.cousinPeers[d.myshard].medianRTT()))
+		d.cousinPeerLock.RUnlock()
 		atomic.StoreUint64(&d.rttEstimate, uint64(rtt))
 
 		// A new RTT cycle passed, increase our confidence in the estimated RTT
@@ -1666,7 +1690,9 @@ func (d *Downloader) qosTuner() {
 // peer set, needing to reduce the confidence we have in out QoS estimates.
 func (d *Downloader) qosReduceConfidence() {
 	// If we have a single peer, confidence is always 1
+	d.cousinPeerLock.RLock()
 	peers := uint64(d.cousinPeers[d.myshard].Len())
+	d.cousinPeerLock.RUnlock()
 	if peers == 0 {
 		// Ensure peer connectivity races don't catch us off guard
 		return
