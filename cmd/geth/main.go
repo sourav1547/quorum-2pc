@@ -123,7 +123,7 @@ var (
 		utils.RinkebyFlag,
 		utils.OttomanFlag,
 		utils.VMEnableDebugFlag,
-		utils.ShardIdFlag,
+		utils.MyShardFlag,
 		utils.NumShardFlag,
 		utils.NetworkIdFlag,
 		utils.RPCCORSDomainFlag,

@@ -39,6 +39,7 @@ type Backend interface {
 	BlockChain() *core.BlockChain
 	TxPool() *core.TxPool
 	ChainDb() ethdb.Database
+	MyShard() uint64
 }
 
 // Miner creates blocks and searches for proof-of-work values.

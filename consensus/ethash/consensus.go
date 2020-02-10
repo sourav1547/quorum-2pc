@@ -616,6 +616,7 @@ func (ethash *Ethash) SealHash(header *types.Header) (hash common.Hash) {
 		header.Bloom,
 		header.Difficulty,
 		header.Number,
+		header.Shard,
 		header.GasLimit,
 		header.GasUsed,
 		header.Time,

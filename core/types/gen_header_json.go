@@ -24,6 +24,7 @@ func (h Header) MarshalJSON() ([]byte, error) {
 		Bloom       Bloom          `json:"logsBloom"        gencodec:"required"`
 		Difficulty  *hexutil.Big   `json:"difficulty"       gencodec:"required"`
 		Number      *hexutil.Big   `json:"number"           gencodec:"required"`
+		Shard       hexutil.Uint64 `json:"shard"	        gencodec:"required"`
 		GasLimit    hexutil.Uint64 `json:"gasLimit"         gencodec:"required"`
 		GasUsed     hexutil.Uint64 `json:"gasUsed"          gencodec:"required"`
 		Time        *hexutil.Big   `json:"timestamp"        gencodec:"required"`
@@ -42,6 +43,7 @@ func (h Header) MarshalJSON() ([]byte, error) {
 	enc.Bloom = h.Bloom
 	enc.Difficulty = (*hexutil.Big)(h.Difficulty)
 	enc.Number = (*hexutil.Big)(h.Number)
+	enc.Shard = hexutil.Uint64(h.Shard)
 	enc.GasLimit = hexutil.Uint64(h.GasLimit)
 	enc.GasUsed = hexutil.Uint64(h.GasUsed)
 	enc.Time = (*hexutil.Big)(h.Time)
@@ -63,6 +65,7 @@ func (h *Header) UnmarshalJSON(input []byte) error {
 		Bloom       *Bloom          `json:"logsBloom"        gencodec:"required"`
 		Difficulty  *hexutil.Big    `json:"difficulty"       gencodec:"required"`
 		Number      *hexutil.Big    `json:"number"           gencodec:"required"`
+		Shard       *hexutil.Uint64 `json:"shard"	         gencodec:"required"`
 		GasLimit    *hexutil.Uint64 `json:"gasLimit"         gencodec:"required"`
 		GasUsed     *hexutil.Uint64 `json:"gasUsed"          gencodec:"required"`
 		Time        *hexutil.Big    `json:"timestamp"        gencodec:"required"`
@@ -110,6 +113,10 @@ func (h *Header) UnmarshalJSON(input []byte) error {
 		return errors.New("missing required field 'number' for Header")
 	}
 	h.Number = (*big.Int)(dec.Number)
+	if dec.Shard == nil {
+		return errors.New("missing required field 'shard' for Header")
+	}
+	h.Shard = uint64(*dec.Shard)
 	if dec.GasLimit == nil {
 		return errors.New("missing required field 'gasLimit' for Header")
 	}

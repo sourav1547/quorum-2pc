@@ -130,10 +130,10 @@ var (
 		Name:  "nousb",
 		Usage: "Disables monitoring for and managing USB hardware wallets",
 	}
-	ShardIdFlag = cli.Uint64Flag{
-		Name:  "shardid",
+	MyShardFlag = cli.Uint64Flag{
+		Name:  "myshard",
 		Usage: "Shard Number for each node in the network, (default=0:Reference shard)",
-		Value: eth.DefaultConfig.ShardId,
+		Value: eth.DefaultConfig.MyShard,
 	}
 	NumShardFlag = cli.Uint64Flag{
 		Name:  "numshard",
@@ -1223,8 +1223,8 @@ func SetEthConfig(ctx *cli.Context, stack *node.Node, cfg *eth.Config) {
 	if ctx.GlobalIsSet(LightPeersFlag.Name) {
 		cfg.LightPeers = ctx.GlobalInt(LightPeersFlag.Name)
 	}
-	if ctx.GlobalIsSet(ShardIdFlag.Name) {
-		cfg.ShardId = ctx.GlobalUint64(ShardIdFlag.Name)
+	if ctx.GlobalIsSet(MyShardFlag.Name) {
+		cfg.MyShard = ctx.GlobalUint64(MyShardFlag.Name)
 	}
 	if ctx.GlobalIsSet(NumShardFlag.Name) {
 		cfg.NumShard = ctx.GlobalUint64(NumShardFlag.Name)

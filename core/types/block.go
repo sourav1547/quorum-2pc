@@ -78,6 +78,7 @@ type Header struct {
 	Bloom       Bloom          `json:"logsBloom"        gencodec:"required"`
 	Difficulty  *big.Int       `json:"difficulty"       gencodec:"required"`
 	Number      *big.Int       `json:"number"           gencodec:"required"`
+	Shard       uint64         `json:"shard" 			gencoded:"required"`
 	GasLimit    uint64         `json:"gasLimit"         gencodec:"required"`
 	GasUsed     uint64         `json:"gasUsed"          gencodec:"required"`
 	Time        *big.Int       `json:"timestamp"        gencodec:"required"`
@@ -90,6 +91,7 @@ type Header struct {
 type headerMarshaling struct {
 	Difficulty *hexutil.Big
 	Number     *hexutil.Big
+	Shard      hexutil.Uint64
 	GasLimit   hexutil.Uint64
 	GasUsed    hexutil.Uint64
 	Time       *hexutil.Big
@@ -296,6 +298,7 @@ func (b *Block) Transaction(hash common.Hash) *Transaction {
 }
 
 func (b *Block) Number() *big.Int     { return new(big.Int).Set(b.header.Number) }
+func (b *Block) Shard() uint64        { return b.header.Shard }
 func (b *Block) GasLimit() uint64     { return b.header.GasLimit }
 func (b *Block) GasUsed() uint64      { return b.header.GasUsed }
 func (b *Block) Difficulty() *big.Int { return new(big.Int).Set(b.header.Difficulty) }

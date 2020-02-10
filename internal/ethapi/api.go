@@ -949,6 +949,7 @@ func RPCMarshalBlock(b *types.Block, inclTx bool, fullTx bool) (map[string]inter
 	head := b.Header() // copies the header once
 	fields := map[string]interface{}{
 		"number":           (*hexutil.Big)(head.Number),
+		"shard":            b.Shard(),
 		"hash":             b.Hash(),
 		"parentHash":       head.ParentHash,
 		"nonce":            head.Nonce,

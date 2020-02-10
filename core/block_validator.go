@@ -84,6 +84,7 @@ func (v *BlockValidator) ValidateState(block, parent *types.Block, statedb *stat
 	if block.GasUsed() != usedGas {
 		return fmt.Errorf("invalid gas used (remote: %d local: %d)", block.GasUsed(), usedGas)
 	}
+	// @sourav, todo: validate contents of shard (if necessary)
 	// Validate the received block's bloom with the one derived from the generated receipts.
 	// For valid blocks this should always validate to true.
 	rbloom := types.CreateBloom(receipts)

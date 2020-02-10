@@ -21,7 +21,7 @@ var _ = (*configMarshaling)(nil)
 func (c Config) MarshalTOML() (interface{}, error) {
 	type Config struct {
 		Genesis                 *core.Genesis `toml:",omitempty"`
-		ShardId                 uint64
+		MyShard                 uint64
 		NumShard                uint64
 		NetworkId               uint64
 		SyncMode                downloader.SyncMode
@@ -50,8 +50,8 @@ func (c Config) MarshalTOML() (interface{}, error) {
 	}
 	var enc Config
 	enc.Genesis = c.Genesis
-	enc.ShardId = c.ShardId
-	enc.ShardId = c.NumShard
+	enc.MyShard = c.MyShard
+	enc.NumShard = c.NumShard
 	enc.NetworkId = c.NetworkId
 	enc.SyncMode = c.SyncMode
 	enc.NoPruning = c.NoPruning
@@ -84,7 +84,7 @@ func (c *Config) UnmarshalTOML(unmarshal func(interface{}) error) error {
 	type Config struct {
 		Genesis                 *core.Genesis `toml:",omitempty"`
 		NumShard                *uint64
-		ShardId                 *uint64
+		MyShard                 *uint64
 		NetworkId               *uint64
 		SyncMode                *downloader.SyncMode
 		NoPruning               *bool
@@ -118,10 +118,10 @@ func (c *Config) UnmarshalTOML(unmarshal func(interface{}) error) error {
 		c.Genesis = dec.Genesis
 	}
 	if dec.NumShard != nil {
-		c.ShardId = *dec.NumShard
+		c.NumShard = *dec.NumShard
 	}
-	if dec.ShardId != nil {
-		c.ShardId = *dec.ShardId
+	if dec.MyShard != nil {
+		c.MyShard = *dec.MyShard
 	}
 	if dec.NetworkId != nil {
 		c.NetworkId = *dec.NetworkId
