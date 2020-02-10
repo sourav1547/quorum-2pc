@@ -765,19 +765,43 @@ func (pm *ProtocolManager) BroadcastBlock(block *types.Block, propagate bool) {
 			log.Error("Propagating dangling block", "number", block.Number(), "hash", hash)
 			return
 		}
-		// Send the block to a subset of our peers
-		transferLen := int(math.Sqrt(float64(len(peers))))
-		if transferLen < minBroadcastPeers {
-			transferLen = minBroadcastPeers
+
+		// If the node belongs to a reference shard, broadcast its
+		// block to a subset of all the shards. Otherwise, broadcast
+		// to only your own shards.
+		if pm.myshard == 0 {
+			numConnectedShard := uint64(len(pm.cousinPeers))
+			for i := uint64(0); i < numConnectedShard; i++ {
+				peers := pm.cousinPeers[i].PeersWithoutBlock(hash)
+				// Send the block to a subset of our peers
+				transferLen := int(math.Sqrt(float64(len(peers))))
+				if transferLen < minBroadcastPeers {
+					transferLen = minBroadcastPeers
+				}
+				if transferLen > len(peers) {
+					transferLen = len(peers)
+				}
+				transfer := peers[:transferLen]
+				for _, peer := range transfer {
+					peer.AsyncSendNewBlock(block, td)
+				}
+				log.Trace("Propagated block", "hash", hash, "recipients", len(transfer), "duration", common.PrettyDuration(time.Since(block.ReceivedAt)))
+			}
+		} else {
+			// Send the block to a subset of our peers
+			transferLen := int(math.Sqrt(float64(len(peers))))
+			if transferLen < minBroadcastPeers {
+				transferLen = minBroadcastPeers
+			}
+			if transferLen > len(peers) {
+				transferLen = len(peers)
+			}
+			transfer := peers[:transferLen]
+			for _, peer := range transfer {
+				peer.AsyncSendNewBlock(block, td)
+			}
+			log.Trace("Propagated block", "hash", hash, "recipients", len(transfer), "duration", common.PrettyDuration(time.Since(block.ReceivedAt)))
 		}
-		if transferLen > len(peers) {
-			transferLen = len(peers)
-		}
-		transfer := peers[:transferLen]
-		for _, peer := range transfer {
-			peer.AsyncSendNewBlock(block, td)
-		}
-		log.Trace("Propagated block", "hash", hash, "recipients", len(transfer), "duration", common.PrettyDuration(time.Since(block.ReceivedAt)))
 		return
 	}
 	// Otherwise if the block is indeed in out own chain, announce it
