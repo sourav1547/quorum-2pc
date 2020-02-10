@@ -82,9 +82,10 @@ type ProtocolManager struct {
 	chainconfig *params.ChainConfig
 	maxPeers    int
 
-	downloader  *downloader.Downloader
-	fetcher     *fetcher.Fetcher
-	cousinPeers map[uint64]*peerSet
+	downloader      *downloader.Downloader
+	fetcher         *fetcher.Fetcher
+	cousinPeers     map[uint64]*peerSet
+	shardAddressMap map[uint64]common.Address
 
 	SubProtocols []p2p.Protocol
 
@@ -112,20 +113,34 @@ type ProtocolManager struct {
 func NewProtocolManager(config *params.ChainConfig, mode downloader.SyncMode, numShard, myshard, networkID uint64, mux *event.TypeMux, txpool txPool, engine consensus.Engine, blockchain *core.BlockChain, chaindb ethdb.Database, raftMode bool) (*ProtocolManager, error) {
 	// Create the protocol manager with the base fields
 	manager := &ProtocolManager{
-		numShard:    numShard,
-		myshard:     myshard,
-		networkID:   networkID,
-		eventMux:    mux,
-		txpool:      txpool,
-		blockchain:  blockchain,
-		chainconfig: config,
-		cousinPeers: make(map[uint64]*peerSet),
-		newPeerCh:   make(chan *peer),
-		noMorePeers: make(chan struct{}),
-		txsyncCh:    make(chan *txsync),
-		quitSync:    make(chan struct{}),
-		raftMode:    raftMode,
-		engine:      engine,
+		numShard:        numShard,
+		myshard:         myshard,
+		networkID:       networkID,
+		eventMux:        mux,
+		txpool:          txpool,
+		blockchain:      blockchain,
+		chainconfig:     config,
+		cousinPeers:     make(map[uint64]*peerSet),
+		shardAddressMap: make(map[uint64]common.Address),
+		newPeerCh:       make(chan *peer),
+		noMorePeers:     make(chan struct{}),
+		txsyncCh:        make(chan *txsync),
+		quitSync:        make(chan struct{}),
+		raftMode:        raftMode,
+		engine:          engine,
+	}
+
+	// To initialize address with shard
+	seed := "6462C73A8D4913910C5AAA748EA82CD67EB4B73D"
+	bigSeed := new(big.Int)
+	bigSeed, ok := bigSeed.SetString(seed, 16)
+	if !ok {
+		log.Error("Shard Address Initialization Failed")
+	}
+	for i := uint64(0); i < manager.numShard; i++ {
+		addr := new(big.Int).SetUint64(i)
+		addr.Add(addr, bigSeed)
+		manager.shardAddressMap[i] = common.BigToAddress(addr)
 	}
 
 	if handler, ok := manager.engine.(consensus.Handler); ok {
@@ -806,10 +821,22 @@ func (pm *ProtocolManager) BroadcastBlock(block *types.Block, propagate bool) {
 	}
 	// Otherwise if the block is indeed in out own chain, announce it
 	if pm.blockchain.HasBlock(hash, block.NumberU64()) {
-		for _, peer := range peers {
-			peer.AsyncSendNewBlockHash(block)
-		}
 		log.Trace("Announced block", "hash", hash, "recipients", len(peers), "duration", common.PrettyDuration(time.Since(block.ReceivedAt)))
+
+		if pm.myshard == 0 {
+			numConnectedShard := uint64(len(pm.cousinPeers))
+			for i := uint64(0); i < numConnectedShard; i++ {
+				peers := pm.cousinPeers[i].PeersWithoutBlock(hash)
+				for _, peer := range peers {
+					peer.AsyncSendNewBlockHash(block)
+				}
+			}
+		} else {
+			peers := pm.cousinPeers[pm.myshard].PeersWithoutBlock(hash)
+			for _, peer := range peers {
+				peer.AsyncSendNewBlockHash(block)
+			}
+		}
 	}
 }
 
