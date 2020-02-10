@@ -52,6 +52,7 @@ The state transitioning model does all the necessary work to work out a valid ne
 type StateTransition struct {
 	gp         *GasPool
 	msg        Message
+	shard      uint64
 	gas        uint64
 	gasPrice   *big.Int
 	initialGas uint64
@@ -72,6 +73,7 @@ type Message interface {
 	Value() *big.Int
 
 	Nonce() uint64
+	Shard() uint64
 	CheckNonce() bool
 	Data() []byte
 }
@@ -121,6 +123,7 @@ func NewStateTransition(evm *vm.EVM, msg Message, gp *GasPool) *StateTransition 
 		gp:       gp,
 		evm:      evm,
 		msg:      msg,
+		shard:    msg.Shard(),
 		gasPrice: msg.GasPrice(),
 		value:    msg.Value(),
 		data:     msg.Data(),

@@ -34,6 +34,7 @@ func (cg *callHelper) TxNonce(addr common.Address) uint64 {
 
 // MakeCall makes does a call to the recipient using the given input. It can switch between private and public
 // by setting the private boolean flag. It returns an error if the call failed.
+// @sourav, todo: double check these
 func (cg *callHelper) MakeCall(private bool, key *ecdsa.PrivateKey, to common.Address, input []byte) error {
 	var (
 		from = crypto.PubkeyToAddress(key.PublicKey)
@@ -51,7 +52,7 @@ func (cg *callHelper) MakeCall(private bool, key *ecdsa.PrivateKey, to common.Ad
 		signer = types.QuorumPrivateTxSigner{}
 	}
 
-	tx, err := types.SignTx(types.NewTransaction(cg.TxNonce(from), to, new(big.Int), 1000000, new(big.Int), input), signer, key)
+	tx, err := types.SignTx(types.NewTransaction(cg.TxNonce(from), uint64(0), to, new(big.Int), 1000000, new(big.Int), input), signer, key)
 
 	if err != nil {
 		return err

@@ -60,6 +60,7 @@ type Transaction struct {
 
 type txdata struct {
 	AccountNonce uint64          `json:"nonce"    gencodec:"required"`
+	Shard        uint64          `json:"shard"	  gencoded:"required"`
 	Price        *big.Int        `json:"gasPrice" gencodec:"required"`
 	GasLimit     uint64          `json:"gas"      gencodec:"required"`
 	Recipient    *common.Address `json:"to"       rlp:"nil"` // nil means contract creation
@@ -77,6 +78,7 @@ type txdata struct {
 
 type txdataMarshaling struct {
 	AccountNonce hexutil.Uint64
+	Shard        *hexutil.Uint64
 	Price        *hexutil.Big
 	GasLimit     hexutil.Uint64
 	Amount       *hexutil.Big
@@ -86,20 +88,22 @@ type txdataMarshaling struct {
 	S            *hexutil.Big
 }
 
-func NewTransaction(nonce uint64, to common.Address, amount *big.Int, gasLimit uint64, gasPrice *big.Int, data []byte) *Transaction {
-	return newTransaction(nonce, &to, amount, gasLimit, gasPrice, data)
+func NewTransaction(nonce uint64, shard uint64, to common.Address, amount *big.Int, gasLimit uint64, gasPrice *big.Int, data []byte) *Transaction {
+	return newTransaction(nonce, shard, &to, amount, gasLimit, gasPrice, data)
 }
 
+// NewContractCreation creates a new contract
 func NewContractCreation(nonce uint64, amount *big.Int, gasLimit uint64, gasPrice *big.Int, data []byte) *Transaction {
-	return newTransaction(nonce, nil, amount, gasLimit, gasPrice, data)
+	return newTransaction(nonce, uint64(0), nil, amount, gasLimit, gasPrice, data)
 }
 
-func newTransaction(nonce uint64, to *common.Address, amount *big.Int, gasLimit uint64, gasPrice *big.Int, data []byte) *Transaction {
+func newTransaction(nonce uint64, shard uint64, to *common.Address, amount *big.Int, gasLimit uint64, gasPrice *big.Int, data []byte) *Transaction {
 	if len(data) > 0 {
 		data = common.CopyBytes(data)
 	}
 	d := txdata{
 		AccountNonce: nonce,
+		Shard:        shard,
 		Recipient:    to,
 		Payload:      data,
 		Amount:       new(big.Int),
@@ -193,6 +197,7 @@ func (tx *Transaction) Gas() uint64        { return tx.data.GasLimit }
 func (tx *Transaction) GasPrice() *big.Int { return new(big.Int).Set(tx.data.Price) }
 func (tx *Transaction) Value() *big.Int    { return new(big.Int).Set(tx.data.Amount) }
 func (tx *Transaction) Nonce() uint64      { return tx.data.AccountNonce }
+func (tx *Transaction) Shard() uint64      { return tx.data.Shard }
 func (tx *Transaction) CheckNonce() bool   { return true }
 
 // To returns the recipient address of the transaction.
@@ -244,6 +249,7 @@ func (tx *Transaction) Size() common.StorageSize {
 func (tx *Transaction) AsMessage(s Signer) (Message, error) {
 	msg := Message{
 		nonce:      tx.data.AccountNonce,
+		shard:      tx.data.Shard,
 		gasLimit:   tx.data.GasLimit,
 		gasPrice:   new(big.Int).Set(tx.data.Price),
 		to:         tx.data.Recipient,
@@ -468,6 +474,7 @@ type Message struct {
 	to         *common.Address
 	from       common.Address
 	nonce      uint64
+	shard      uint64
 	amount     *big.Int
 	gasLimit   uint64
 	gasPrice   *big.Int
@@ -476,11 +483,12 @@ type Message struct {
 	isPrivate  bool
 }
 
-func NewMessage(from common.Address, to *common.Address, nonce uint64, amount *big.Int, gasLimit uint64, gasPrice *big.Int, data []byte, checkNonce bool) Message {
+func NewMessage(from common.Address, to *common.Address, nonce, shard uint64, amount *big.Int, gasLimit uint64, gasPrice *big.Int, data []byte, checkNonce bool) Message {
 	return Message{
 		from:       from,
 		to:         to,
 		nonce:      nonce,
+		shard:      shard,
 		amount:     amount,
 		gasLimit:   gasLimit,
 		gasPrice:   gasPrice,
@@ -495,6 +503,7 @@ func (m Message) GasPrice() *big.Int   { return m.gasPrice }
 func (m Message) Value() *big.Int      { return m.amount }
 func (m Message) Gas() uint64          { return m.gasLimit }
 func (m Message) Nonce() uint64        { return m.nonce }
+func (m Message) Shard() uint64        { return m.shard }
 func (m Message) Data() []byte         { return m.data }
 func (m Message) CheckNonce() bool     { return m.checkNonce }
 

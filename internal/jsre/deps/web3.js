@@ -3784,6 +3784,7 @@ var outputTransactionFormatter = function (tx){
     tx.gas = utils.toDecimal(tx.gas);
     tx.gasPrice = utils.toBigNumber(tx.gasPrice);
     tx.value = utils.toBigNumber(tx.value);
+    tx.shard = utils.toDecimal(tx.shard);
     return tx;
 };
 
