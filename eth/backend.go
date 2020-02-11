@@ -66,6 +66,9 @@ type Ethereum struct {
 	config      *Config
 	chainConfig *params.ChainConfig
 
+	refAddress  common.Address
+	shardAddMap map[uint64]*big.Int
+
 	// Channel for shutting down the service
 	shutdownChan chan bool // Channel for shutting down the Ethereum
 
@@ -162,6 +165,21 @@ func New(ctx *node.ServiceContext, config *Config) (*Ethereum, error) {
 		etherbase:      config.Etherbase,
 		bloomRequests:  make(chan chan *bloombits.Retrieval),
 		bloomIndexer:   NewBloomIndexer(chainDb, params.BloomBitsBlocks, params.BloomConfirms),
+		shardAddMap:    make(map[uint64]*big.Int),
+	}
+
+	// To initialize address with shard
+	seed := "6462C73A8D4913910C5AAA748EA82CD67EB4B73D"
+	refAddress := new(big.Int)
+	refAddress, ok := refAddress.SetString(seed, 16)
+	if !ok {
+		log.Error("Shard Address Initialization Failed")
+	}
+	eth.refAddress = common.BigToAddress(refAddress)
+	for i := uint64(1); i < eth.myShard; i++ {
+		addr := new(big.Int).SetUint64(i)
+		addr.Add(addr, refAddress)
+		eth.shardAddMap[i] = addr
 	}
 
 	// force to set the istanbul etherbase to node key address
@@ -201,9 +219,9 @@ func New(ctx *node.ServiceContext, config *Config) (*Ethereum, error) {
 	if config.TxPool.Journal != "" {
 		config.TxPool.Journal = ctx.ResolvePath(config.TxPool.Journal)
 	}
-	eth.txPool = core.NewTxPool(config.TxPool, eth.chainConfig, eth.blockchain)
+	eth.txPool = core.NewTxPool(config.TxPool, eth.chainConfig, eth.refAddress, eth.shardAddMap, eth.blockchain)
 
-	if eth.protocolManager, err = NewProtocolManager(eth.chainConfig, config.SyncMode, config.NumShard, config.MyShard, config.NetworkId, eth.eventMux, eth.txPool, eth.engine, eth.blockchain, chainDb, config.RaftMode); err != nil {
+	if eth.protocolManager, err = NewProtocolManager(eth.chainConfig, config.SyncMode, config.NumShard, config.MyShard, config.NetworkId, eth.eventMux, eth.txPool, eth.engine, eth.blockchain, eth.refAddress, eth.shardAddMap, chainDb, config.RaftMode); err != nil {
 		return nil, err
 	}
 

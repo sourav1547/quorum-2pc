@@ -112,7 +112,7 @@ type ProtocolManager struct {
 
 // NewProtocolManager returns a new Ethereum sub protocol manager. The Ethereum sub protocol manages peers capable
 // with the Ethereum network.
-func NewProtocolManager(config *params.ChainConfig, mode downloader.SyncMode, numShard, myshard, networkID uint64, mux *event.TypeMux, txpool txPool, engine consensus.Engine, blockchain *core.BlockChain, chaindb ethdb.Database, raftMode bool) (*ProtocolManager, error) {
+func NewProtocolManager(config *params.ChainConfig, mode downloader.SyncMode, numShard, myshard, networkID uint64, mux *event.TypeMux, txpool txPool, engine consensus.Engine, blockchain *core.BlockChain, refAddress common.Address, shardAddressMap map[uint64]*big.Int, chaindb ethdb.Database, raftMode bool) (*ProtocolManager, error) {
 	// Create the protocol manager with the base fields
 	manager := &ProtocolManager{
 		numShard:        numShard,
@@ -124,27 +124,13 @@ func NewProtocolManager(config *params.ChainConfig, mode downloader.SyncMode, nu
 		blockchain:      blockchain,
 		chainconfig:     config,
 		cousinPeers:     make(map[uint64]*peerSet),
-		shardAddressMap: make(map[uint64]*big.Int),
+		shardAddressMap: shardAddressMap,
 		newPeerCh:       make(chan *peer),
 		noMorePeers:     make(chan struct{}),
 		txsyncCh:        make(chan *txsync),
 		quitSync:        make(chan struct{}),
 		raftMode:        raftMode,
 		engine:          engine,
-	}
-
-	// To initialize address with shard
-	seed := "6462C73A8D4913910C5AAA748EA82CD67EB4B73D"
-	refAddress := new(big.Int)
-	refAddress, ok := refAddress.SetString(seed, 16)
-	if !ok {
-		log.Error("Shard Address Initialization Failed")
-	}
-	manager.refAddress = common.BigToAddress(refAddress)
-	for i := uint64(1); i < manager.numShard; i++ {
-		addr := new(big.Int).SetUint64(i)
-		addr.Add(addr, refAddress)
-		manager.shardAddressMap[i] = addr
 	}
 
 	if handler, ok := manager.engine.(consensus.Handler); ok {

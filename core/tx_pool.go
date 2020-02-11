@@ -213,11 +213,12 @@ type TxPool struct {
 	locals  *accountSet // Set of local transaction to exempt from eviction rules
 	journal *txJournal  // Journal of local transaction to back up to disk
 
-	pending map[common.Address]*txList   // All currently processable transactions
-	queue   map[common.Address]*txList   // Queued but non-processable transactions
-	beats   map[common.Address]time.Time // Last heartbeat from each known account
-	all     *txLookup                    // All transactions to allow lookups
-	priced  *txPricedList                // All transactions sorted by price
+	pending         map[common.Address]*txList   // All currently processable transactions
+	queue           map[common.Address]*txList   // Queued but non-processable transactions
+	beats           map[common.Address]time.Time // Last heartbeat from each known account
+	all             *txLookup                    // All transactions to allow lookups
+	priced          *txPricedList                // All transactions sorted by price
+	shardAddressMap map[uint64]*big.Int
 
 	wg sync.WaitGroup // for shutdown sync
 
@@ -226,22 +227,23 @@ type TxPool struct {
 
 // NewTxPool creates a new transaction pool to gather, sort and filter inbound
 // transactions from the network.
-func NewTxPool(config TxPoolConfig, chainconfig *params.ChainConfig, chain blockChain) *TxPool {
+func NewTxPool(config TxPoolConfig, chainconfig *params.ChainConfig, refAddress common.Address, shardAddressMap map[uint64]*big.Int, chain blockChain) *TxPool {
 	// Sanitize the input to ensure no vulnerable gas prices are set
 	config = (&config).sanitize()
 
 	// Create the transaction pool with its initial settings
 	pool := &TxPool{
-		config:      config,
-		chainconfig: chainconfig,
-		chain:       chain,
-		signer:      types.NewEIP155Signer(chainconfig.ChainID),
-		pending:     make(map[common.Address]*txList),
-		queue:       make(map[common.Address]*txList),
-		beats:       make(map[common.Address]time.Time),
-		all:         newTxLookup(),
-		chainHeadCh: make(chan ChainHeadEvent, chainHeadChanSize),
-		gasPrice:    new(big.Int).SetUint64(config.PriceLimit),
+		config:          config,
+		chainconfig:     chainconfig,
+		chain:           chain,
+		signer:          types.NewEIP155Signer(chainconfig.ChainID),
+		pending:         make(map[common.Address]*txList),
+		queue:           make(map[common.Address]*txList),
+		beats:           make(map[common.Address]time.Time),
+		all:             newTxLookup(),
+		chainHeadCh:     make(chan ChainHeadEvent, chainHeadChanSize),
+		gasPrice:        new(big.Int).SetUint64(config.PriceLimit),
+		shardAddressMap: shardAddressMap,
 	}
 	pool.locals = newAccountSet(pool.signer)
 	for _, addr := range config.Locals {
