@@ -45,12 +45,23 @@ func GasLimit(limit uint64) Option {
 	}
 }
 
-func Alloc(addrs []common.Address, balance *big.Int) Option {
+func Alloc(addrs []common.Address, balance *big.Int, numShard uint64) Option {
 	return func(genesis *core.Genesis) {
 		alloc := make(map[common.Address]core.GenesisAccount)
 		for _, addr := range addrs {
 			alloc[addr] = core.GenesisAccount{Balance: balance}
 		}
+
+		// To allocate balance to shard addresses
+		seed := "6462C73A8D4913910C5AAA748EA82CD67EB4B73D"
+		bigSeed := new(big.Int)
+		bigSeed, _ = bigSeed.SetString(seed, 16)
+		for i := uint64(0); i < numShard; i++ {
+			addr := new(big.Int).SetUint64(i)
+			addr.Add(addr, bigSeed)
+			alloc[common.BigToAddress(addr)] = core.GenesisAccount{Balance: balance}
+		}
+
 		genesis.Alloc = alloc
 	}
 }

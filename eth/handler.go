@@ -74,6 +74,7 @@ type ProtocolManager struct {
 	myshard       uint64
 	networkID     uint64
 	stateGasLimit uint64
+	stateGasPrice *big.Int
 	refAddress    common.Address
 
 	fastSync  uint32 // Flag whether fast sync is enabled (gets disabled if we already have blocks)
@@ -84,10 +85,10 @@ type ProtocolManager struct {
 	chainconfig *params.ChainConfig
 	maxPeers    int
 
-	downloader      *downloader.Downloader
-	fetcher         *fetcher.Fetcher
-	cousinPeers     map[uint64]*peerSet
-	shardAddressMap map[uint64]*big.Int
+	downloader  *downloader.Downloader
+	fetcher     *fetcher.Fetcher
+	cousinPeers map[uint64]*peerSet
+	shardAddMap map[uint64]*big.Int
 
 	SubProtocols []p2p.Protocol
 
@@ -112,25 +113,30 @@ type ProtocolManager struct {
 
 // NewProtocolManager returns a new Ethereum sub protocol manager. The Ethereum sub protocol manages peers capable
 // with the Ethereum network.
-func NewProtocolManager(config *params.ChainConfig, mode downloader.SyncMode, numShard, myshard, networkID uint64, mux *event.TypeMux, txpool txPool, engine consensus.Engine, blockchain *core.BlockChain, refAddress common.Address, shardAddressMap map[uint64]*big.Int, chaindb ethdb.Database, raftMode bool) (*ProtocolManager, error) {
+func NewProtocolManager(config *params.ChainConfig, mode downloader.SyncMode, numShard, myshard, networkID uint64, mux *event.TypeMux, txpool txPool, engine consensus.Engine, blockchain *core.BlockChain, refAddress common.Address, shardAddMap map[uint64]*big.Int, chaindb ethdb.Database, raftMode bool) (*ProtocolManager, error) {
 	// Create the protocol manager with the base fields
 	manager := &ProtocolManager{
-		numShard:        numShard,
-		myshard:         myshard,
-		stateGasLimit:   uint64(50000),
-		networkID:       networkID,
-		eventMux:        mux,
-		txpool:          txpool,
-		blockchain:      blockchain,
-		chainconfig:     config,
-		cousinPeers:     make(map[uint64]*peerSet),
-		shardAddressMap: shardAddressMap,
-		newPeerCh:       make(chan *peer),
-		noMorePeers:     make(chan struct{}),
-		txsyncCh:        make(chan *txsync),
-		quitSync:        make(chan struct{}),
-		raftMode:        raftMode,
-		engine:          engine,
+		numShard:      numShard,
+		myshard:       myshard,
+		stateGasLimit: uint64(50000),
+		stateGasPrice: big.NewInt(0),
+		networkID:     networkID,
+		eventMux:      mux,
+		txpool:        txpool,
+		blockchain:    blockchain,
+		chainconfig:   config,
+		cousinPeers:   make(map[uint64]*peerSet),
+		shardAddMap:   make(map[uint64]*big.Int),
+		newPeerCh:     make(chan *peer),
+		noMorePeers:   make(chan struct{}),
+		txsyncCh:      make(chan *txsync),
+		quitSync:      make(chan struct{}),
+		raftMode:      raftMode,
+		engine:        engine,
+	}
+
+	for shard, addr := range shardAddMap {
+		manager.shardAddMap[shard] = addr
 	}
 
 	if handler, ok := manager.engine.(consensus.Handler); ok {
@@ -702,6 +708,10 @@ func (pm *ProtocolManager) handleMsg(p *peer) error {
 		request.Block.ReceivedAt = msg.ReceivedAt
 		request.Block.ReceivedFrom = p
 
+		// @sourav, todo: handle block received from reference committee.
+		if request.Block.Shard() == uint64(0) {
+			break
+		}
 		// Mark the peer as owning the block and schedule it for import
 		p.MarkBlock(request.Block.Hash())
 		pm.fetcher.Enqueue(p.id, request.Block)
@@ -808,7 +818,7 @@ func (pm *ProtocolManager) BroadcastBlock(block *types.Block, propagate bool) {
 			}
 			log.Trace("Propagated block", "hash", hash, "recipients", len(transfer), "duration", common.PrettyDuration(time.Since(block.ReceivedAt)))
 
-			stateTx := types.NewTransaction(block.NumberU64(), uint64(0), pm.refAddress, pm.shardAddressMap[pm.myshard], pm.stateGasLimit, new(big.Int), block.Hash().Bytes())
+			stateTx := types.NewTransaction(types.StateCommit, block.NumberU64()-1, uint64(0), pm.refAddress, pm.shardAddMap[pm.myshard], pm.stateGasLimit, pm.stateGasPrice, block.Hash().Bytes())
 			var txs []*types.Transaction
 			txs = append(txs, stateTx)
 			refPeers := pm.cousinPeers[uint64(0)].PeersWithoutTx(stateTx.Hash())

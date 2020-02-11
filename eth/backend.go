@@ -176,10 +176,11 @@ func New(ctx *node.ServiceContext, config *Config) (*Ethereum, error) {
 		log.Error("Shard Address Initialization Failed")
 	}
 	eth.refAddress = common.BigToAddress(refAddress)
-	for i := uint64(1); i < eth.myShard; i++ {
+	for i := uint64(1); i < eth.numShard; i++ {
 		addr := new(big.Int).SetUint64(i)
 		addr.Add(addr, refAddress)
 		eth.shardAddMap[i] = addr
+		log.Debug("Address created for ", "shard", i, "address", common.BigToAddress(addr))
 	}
 
 	// force to set the istanbul etherbase to node key address

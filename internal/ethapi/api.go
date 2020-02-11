@@ -762,7 +762,7 @@ func (s *PublicBlockChainAPI) doCall(ctx context.Context, args CallArgs, blockNr
 	}
 
 	// Create new call message
-	msg := types.NewMessage(addr, args.To, uint64(0), uint64(0), args.Value.ToInt(), gas, gasPrice, args.Data, false)
+	msg := types.NewMessage(addr, args.To, types.Others, uint64(0), uint64(0), args.Value.ToInt(), gas, gasPrice, args.Data, false)
 
 	// Setup context so it may be cancelled the call has completed
 	// or, in case of unmetered gas, setup a context with a timeout.
@@ -1232,6 +1232,7 @@ func (s *PublicTransactionPoolAPI) GetTransactionReceipt(ctx context.Context, ha
 		"from":              from,
 		"to":                tx.To(),
 		"shard":             tx.Shard(),
+		"txType":            tx.TxType(),
 		"gasUsed":           hexutil.Uint64(receipt.GasUsed),
 		"cumulativeGasUsed": hexutil.Uint64(receipt.CumulativeGasUsed),
 		"contractAddress":   nil,
@@ -1281,6 +1282,7 @@ type SendTxArgs struct {
 	GasPrice *hexutil.Big    `json:"gasPrice"`
 	Value    *hexutil.Big    `json:"value"`
 	Nonce    *hexutil.Uint64 `json:"nonce"`
+	TxType   *hexutil.Uint64 `json:"txType"`
 	Shard    *hexutil.Uint64 `json:"shard"`
 	// We accept "data" and "input" for backwards-compatibility reasons. "input" is the
 	// newer name and should be preferred by clients.
@@ -1308,6 +1310,10 @@ func (args *SendTxArgs) setDefaults(ctx context.Context, b Backend) error {
 	if args.Gas == nil {
 		args.Gas = new(hexutil.Uint64)
 		*(*uint64)(args.Gas) = 90000
+	}
+	if args.TxType == nil {
+		args.TxType = new(hexutil.Uint64)
+		*(*uint64)(args.TxType) = 0
 	}
 	if args.Shard == nil {
 		args.Shard = new(hexutil.Uint64)
@@ -1348,7 +1354,7 @@ func (args *SendTxArgs) toTransaction() *types.Transaction {
 	if args.To == nil {
 		return types.NewContractCreation(uint64(*args.Nonce), (*big.Int)(args.Value), uint64(*args.Gas), (*big.Int)(args.GasPrice), input)
 	}
-	return types.NewTransaction(uint64(*args.Nonce), uint64(*args.Shard), *args.To, (*big.Int)(args.Value), uint64(*args.Gas), (*big.Int)(args.GasPrice), input)
+	return types.NewTransaction(uint64(*args.TxType), uint64(*args.Nonce), uint64(*args.Shard), *args.To, (*big.Int)(args.Value), uint64(*args.Gas), (*big.Int)(args.GasPrice), input)
 }
 
 // TODO: this submits a signed transaction, if it is a signed private transaction that should already be recorded in the tx.
@@ -1740,24 +1746,6 @@ func (s *PublicNetAPI) PeerCount() hexutil.Uint {
 	return hexutil.Uint(s.net.PeerCount())
 }
 
-/**
-// @sourav, todo: add api
-// CousinPeerCount for a given shard
-func (s *PublicNetAPI) CousinPeerCount(ctx context.Context, shard uint64) hexutil.Uint {
-	return hexutil.Uint(s.net.CousinPeerCount(shard))
-}
-
-// Connected Nodes across all shard
-func (s *PublicNetAPI) CousinPeersCount() hexutil.Uint {
-	return hexutil.Uint(s.net.CousinPeersCount())
-}
-
-// RefPeerCount for a given shard.
-func (s *PublicNetAPI) RefPeerCount() hexutil.Uint {
-	return hexutil.Uint(s.net.RefPeerCount())
-}
-
-**/
 // Version returns the current ethereum protocol version.
 func (s *PublicNetAPI) Version() string {
 	return fmt.Sprintf("%d", s.networkVersion)

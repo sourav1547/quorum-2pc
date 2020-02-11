@@ -52,7 +52,7 @@ func (cg *callHelper) MakeCall(private bool, key *ecdsa.PrivateKey, to common.Ad
 		signer = types.QuorumPrivateTxSigner{}
 	}
 
-	tx, err := types.SignTx(types.NewTransaction(cg.TxNonce(from), uint64(0), to, new(big.Int), 1000000, new(big.Int), input), signer, key)
+	tx, err := types.SignTx(types.NewTransaction(types.Others, cg.TxNonce(from), uint64(0), to, new(big.Int), 1000000, new(big.Int), input), signer, key)
 
 	if err != nil {
 		return err

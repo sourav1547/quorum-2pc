@@ -115,6 +115,7 @@ type ChainSyncReader interface {
 type CallMsg struct {
 	From     common.Address  // the sender of the 'transaction'
 	To       *common.Address // the destination contract (nil for contract creation)
+	TxType   uint64
 	Shard    uint64
 	Gas      uint64   // if 0, the call executes with near-infinite gas
 	GasPrice *big.Int // wei <-> gas exchange ratio

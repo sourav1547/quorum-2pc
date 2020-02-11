@@ -103,7 +103,7 @@ func getGenesisWithAddrs(addrs []common.Address, isQuorum bool) ([]byte, error) 
 	// generate genesis block
 	istanbulGenesis := genesis.New(
 		genesis.Validators(addrs...),
-		genesis.Alloc(addrs, new(big.Int).Exp(big.NewInt(10), big.NewInt(50), nil)),
+		genesis.Alloc(addrs, new(big.Int).Exp(big.NewInt(10), big.NewInt(50), nil), uint64(0)),
 	)
 	var jsonBytes []byte
 	var err error

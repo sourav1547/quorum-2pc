@@ -54,6 +54,7 @@ type CallOpts struct {
 type TransactOpts struct {
 	From   common.Address // Ethereum account to send the transaction from
 	Nonce  *big.Int       // Nonce to use for the transaction execution (nil = use pending state)
+	TxType *big.Int
 	Shard  *big.Int
 	Signer SignerFn // Method to use for signing the transaction (mandatory)
 
@@ -242,7 +243,7 @@ func (c *BoundContract) transact(opts *TransactOpts, contract *common.Address, i
 	if contract == nil {
 		rawTx = types.NewContractCreation(nonce, value, gasLimit, gasPrice, input)
 	} else {
-		rawTx = types.NewTransaction(nonce, opts.Shard.Uint64(), c.address, value, gasLimit, gasPrice, input)
+		rawTx = types.NewTransaction(opts.TxType.Uint64(), nonce, opts.Shard.Uint64(), c.address, value, gasLimit, gasPrice, input)
 	}
 
 	// If this transaction is private, we need to substitute the data payload
@@ -379,7 +380,7 @@ func (c *BoundContract) createPrivateTransaction(tx *types.Transaction, payload 
 	if tx.To() == nil {
 		privateTx = types.NewContractCreation(tx.Nonce(), tx.Value(), tx.Gas(), tx.GasPrice(), payload)
 	} else {
-		privateTx = types.NewTransaction(tx.Nonce(), tx.Shard(), c.address, tx.Value(), tx.Gas(), tx.GasPrice(), payload)
+		privateTx = types.NewTransaction(tx.TxType(), tx.Nonce(), tx.Shard(), c.address, tx.Value(), tx.Gas(), tx.GasPrice(), payload)
 	}
 	privateTx.SetPrivate()
 	return privateTx

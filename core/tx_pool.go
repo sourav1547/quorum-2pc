@@ -213,12 +213,12 @@ type TxPool struct {
 	locals  *accountSet // Set of local transaction to exempt from eviction rules
 	journal *txJournal  // Journal of local transaction to back up to disk
 
-	pending         map[common.Address]*txList   // All currently processable transactions
-	queue           map[common.Address]*txList   // Queued but non-processable transactions
-	beats           map[common.Address]time.Time // Last heartbeat from each known account
-	all             *txLookup                    // All transactions to allow lookups
-	priced          *txPricedList                // All transactions sorted by price
-	shardAddressMap map[uint64]*big.Int
+	pending     map[common.Address]*txList   // All currently processable transactions
+	queue       map[common.Address]*txList   // Queued but non-processable transactions
+	beats       map[common.Address]time.Time // Last heartbeat from each known account
+	all         *txLookup                    // All transactions to allow lookups
+	priced      *txPricedList                // All transactions sorted by price
+	shardAddMap map[uint64]*big.Int
 
 	wg sync.WaitGroup // for shutdown sync
 
@@ -227,23 +227,27 @@ type TxPool struct {
 
 // NewTxPool creates a new transaction pool to gather, sort and filter inbound
 // transactions from the network.
-func NewTxPool(config TxPoolConfig, chainconfig *params.ChainConfig, refAddress common.Address, shardAddressMap map[uint64]*big.Int, chain blockChain) *TxPool {
+func NewTxPool(config TxPoolConfig, chainconfig *params.ChainConfig, refAddress common.Address, shardAddMap map[uint64]*big.Int, chain blockChain) *TxPool {
 	// Sanitize the input to ensure no vulnerable gas prices are set
 	config = (&config).sanitize()
 
 	// Create the transaction pool with its initial settings
 	pool := &TxPool{
-		config:          config,
-		chainconfig:     chainconfig,
-		chain:           chain,
-		signer:          types.NewEIP155Signer(chainconfig.ChainID),
-		pending:         make(map[common.Address]*txList),
-		queue:           make(map[common.Address]*txList),
-		beats:           make(map[common.Address]time.Time),
-		all:             newTxLookup(),
-		chainHeadCh:     make(chan ChainHeadEvent, chainHeadChanSize),
-		gasPrice:        new(big.Int).SetUint64(config.PriceLimit),
-		shardAddressMap: shardAddressMap,
+		config:      config,
+		chainconfig: chainconfig,
+		chain:       chain,
+		signer:      types.NewEIP155Signer(chainconfig.ChainID),
+		pending:     make(map[common.Address]*txList),
+		queue:       make(map[common.Address]*txList),
+		beats:       make(map[common.Address]time.Time),
+		all:         newTxLookup(),
+		chainHeadCh: make(chan ChainHeadEvent, chainHeadChanSize),
+		gasPrice:    new(big.Int).SetUint64(config.PriceLimit),
+		shardAddMap: make(map[uint64]*big.Int),
+	}
+
+	for shard, addr := range shardAddMap {
+		pool.shardAddMap[shard] = addr
 	}
 	pool.locals = newAccountSet(pool.signer)
 	for _, addr := range config.Locals {
@@ -658,12 +662,22 @@ func (pool *TxPool) add(tx *types.Transaction, local bool) (bool, error) {
 		log.Trace("Discarding already known transaction", "hash", hash)
 		return false, fmt.Errorf("known transaction: %x", hash)
 	}
-	// If the transaction fails basic validation, discard it
-	if err := pool.validateTx(tx, local); err != nil {
-		log.Trace("Discarding invalid transaction", "hash", hash, "err", err)
-		invalidTxCounter.Inc(1)
-		return false, err
+
+	from, _ := types.Sender(pool.signer, tx)
+	if tx.TxType() != types.StateCommit {
+		// If the transaction fails basic validation, discard it
+		if err := pool.validateTx(tx, local); err != nil {
+			log.Trace("Discarding invalid transaction", "hash", hash, "err", err)
+			invalidTxCounter.Inc(1)
+			return false, err
+		}
+	} else {
+		// Ensure the transaction adheres to nonce ordering
+		if pool.currentState.GetNonce(from) > tx.Nonce() {
+			return false, ErrNonceTooLow
+		}
 	}
+
 	// If the transaction pool is full, discard underpriced transactions
 	if uint64(pool.all.Count()) >= pool.config.GlobalSlots+pool.config.GlobalQueue {
 		// If the new transaction is underpriced, don't accept it
@@ -681,7 +695,7 @@ func (pool *TxPool) add(tx *types.Transaction, local bool) (bool, error) {
 		}
 	}
 	// If the transaction is replacing an already pending one, do directly
-	from, _ := types.Sender(pool.signer, tx) // already validated
+	// already validated
 	if list := pool.pending[from]; list != nil && list.Overlaps(tx) {
 		// Nonce already pending, check if required price bump is met
 		inserted, old := list.Add(tx, pool.config.PriceBump)
@@ -731,7 +745,11 @@ func (pool *TxPool) enqueueTx(hash common.Hash, tx *types.Transaction) (bool, er
 	// Try to insert the transaction into the future queue
 	from, _ := types.Sender(pool.signer, tx) // already validated
 	if pool.queue[from] == nil {
-		pool.queue[from] = newTxList(false)
+		if tx.TxType() == 0 {
+			pool.queue[from] = newTxList(true)
+		} else {
+			pool.queue[from] = newTxList(false)
+		}
 	}
 	inserted, old := pool.queue[from].Add(tx, pool.config.PriceBump)
 	if !inserted {

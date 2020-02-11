@@ -134,7 +134,7 @@ func gen(ctx *cli.Context) error {
 	isQuorum := ctx.Bool(quorumFlag.Name)
 	g := genesis.New(
 		genesis.Validators(addrs...),
-		genesis.Alloc(addrs, new(big.Int).Exp(big.NewInt(10), big.NewInt(50), nil)),
+		genesis.Alloc(addrs, new(big.Int).Exp(big.NewInt(10), big.NewInt(50), nil), uint64(numShard)),
 	)
 
 	if isQuorum {
