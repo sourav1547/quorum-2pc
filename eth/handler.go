@@ -70,9 +70,11 @@ func errResp(code errCode, format string, v ...interface{}) error {
 }
 
 type ProtocolManager struct {
-	numShard  uint64
-	myshard   uint64
-	networkID uint64
+	numShard      uint64
+	myshard       uint64
+	networkID     uint64
+	stateGasLimit uint64
+	refAddress    common.Address
 
 	fastSync  uint32 // Flag whether fast sync is enabled (gets disabled if we already have blocks)
 	acceptTxs uint32 // Flag whether we're considered synchronised (enables transaction processing)
@@ -85,7 +87,7 @@ type ProtocolManager struct {
 	downloader      *downloader.Downloader
 	fetcher         *fetcher.Fetcher
 	cousinPeers     map[uint64]*peerSet
-	shardAddressMap map[uint64]common.Address
+	shardAddressMap map[uint64]*big.Int
 
 	SubProtocols []p2p.Protocol
 
@@ -115,13 +117,14 @@ func NewProtocolManager(config *params.ChainConfig, mode downloader.SyncMode, nu
 	manager := &ProtocolManager{
 		numShard:        numShard,
 		myshard:         myshard,
+		stateGasLimit:   uint64(50000),
 		networkID:       networkID,
 		eventMux:        mux,
 		txpool:          txpool,
 		blockchain:      blockchain,
 		chainconfig:     config,
 		cousinPeers:     make(map[uint64]*peerSet),
-		shardAddressMap: make(map[uint64]common.Address),
+		shardAddressMap: make(map[uint64]*big.Int),
 		newPeerCh:       make(chan *peer),
 		noMorePeers:     make(chan struct{}),
 		txsyncCh:        make(chan *txsync),
@@ -132,15 +135,16 @@ func NewProtocolManager(config *params.ChainConfig, mode downloader.SyncMode, nu
 
 	// To initialize address with shard
 	seed := "6462C73A8D4913910C5AAA748EA82CD67EB4B73D"
-	bigSeed := new(big.Int)
-	bigSeed, ok := bigSeed.SetString(seed, 16)
+	refAddress := new(big.Int)
+	refAddress, ok := refAddress.SetString(seed, 16)
 	if !ok {
 		log.Error("Shard Address Initialization Failed")
 	}
-	for i := uint64(0); i < manager.numShard; i++ {
+	manager.refAddress = common.BigToAddress(refAddress)
+	for i := uint64(1); i < manager.numShard; i++ {
 		addr := new(big.Int).SetUint64(i)
-		addr.Add(addr, bigSeed)
-		manager.shardAddressMap[i] = common.BigToAddress(addr)
+		addr.Add(addr, refAddress)
+		manager.shardAddressMap[i] = addr
 	}
 
 	if handler, ok := manager.engine.(consensus.Handler); ok {
@@ -768,7 +772,6 @@ func (pm *ProtocolManager) Enqueue(id string, block *types.Block) {
 // will only announce it's availability (depending what's requested).
 func (pm *ProtocolManager) BroadcastBlock(block *types.Block, propagate bool) {
 	hash := block.Hash()
-	peers := pm.cousinPeers[pm.myshard].PeersWithoutBlock(hash)
 
 	// If propagation is requested, send to a subset of the peer
 	if propagate {
@@ -803,6 +806,8 @@ func (pm *ProtocolManager) BroadcastBlock(block *types.Block, propagate bool) {
 				log.Trace("Propagated block", "hash", hash, "recipients", len(transfer), "duration", common.PrettyDuration(time.Since(block.ReceivedAt)))
 			}
 		} else {
+
+			peers := pm.cousinPeers[pm.myshard].PeersWithoutBlock(hash)
 			// Send the block to a subset of our peers
 			transferLen := int(math.Sqrt(float64(len(peers))))
 			if transferLen < minBroadcastPeers {
@@ -816,27 +821,48 @@ func (pm *ProtocolManager) BroadcastBlock(block *types.Block, propagate bool) {
 				peer.AsyncSendNewBlock(block, td)
 			}
 			log.Trace("Propagated block", "hash", hash, "recipients", len(transfer), "duration", common.PrettyDuration(time.Since(block.ReceivedAt)))
+
+			stateTx := types.NewTransaction(block.NumberU64(), uint64(0), pm.refAddress, pm.shardAddressMap[pm.myshard], pm.stateGasLimit, new(big.Int), block.Hash().Bytes())
+			var txs []*types.Transaction
+			txs = append(txs, stateTx)
+			refPeers := pm.cousinPeers[uint64(0)].PeersWithoutTx(stateTx.Hash())
+
+			// Send the block to a subset of our peers
+			rTransferLen := int(math.Sqrt(float64(len(refPeers))))
+			if rTransferLen < minBroadcastPeers {
+				rTransferLen = minBroadcastPeers
+			}
+			if rTransferLen > len(refPeers) {
+				rTransferLen = len(refPeers)
+			}
+			rTransfer := refPeers[:rTransferLen]
+			for _, peer := range rTransfer {
+				peer.AsyncSendTransactions(txs)
+			}
+			log.Trace("Propagated state committment", "number", block.Number(), "hash", stateTx.Hash())
 		}
 		return
 	}
 	// Otherwise if the block is indeed in out own chain, announce it
 	if pm.blockchain.HasBlock(hash, block.NumberU64()) {
-		log.Trace("Announced block", "hash", hash, "recipients", len(peers), "duration", common.PrettyDuration(time.Since(block.ReceivedAt)))
-
+		receipients := 0
 		if pm.myshard == 0 {
 			numConnectedShard := uint64(len(pm.cousinPeers))
 			for i := uint64(0); i < numConnectedShard; i++ {
 				peers := pm.cousinPeers[i].PeersWithoutBlock(hash)
 				for _, peer := range peers {
 					peer.AsyncSendNewBlockHash(block)
+					receipients++
 				}
 			}
 		} else {
 			peers := pm.cousinPeers[pm.myshard].PeersWithoutBlock(hash)
 			for _, peer := range peers {
 				peer.AsyncSendNewBlockHash(block)
+				receipients++
 			}
 		}
+		log.Trace("Announced block", "hash", hash, "recipients", receipients, "duration", common.PrettyDuration(time.Since(block.ReceivedAt)))
 	}
 }
 
