@@ -104,6 +104,7 @@ type Downloader struct {
 	cousinPeers    map[uint64]*peerSet
 	cousinPeerLock sync.RWMutex
 	stateDB        ethdb.Database
+	refDB          ethdb.Database
 
 	rttEstimate   uint64 // Round trip time to target for download requests
 	rttConfidence uint64 // Confidence in the estimated RTT (unit: millionths to allow atomic ops)
@@ -116,6 +117,7 @@ type Downloader struct {
 
 	lightchain LightChain
 	blockchain BlockChain
+	refchain   BlockChain
 
 	// Callbacks
 	dropPeer peerDropFn // Drops a peer for misbehaving
@@ -203,7 +205,7 @@ type BlockChain interface {
 }
 
 // New creates a new downloader to fetch hashes and blocks from remote peers.
-func New(mode SyncMode, stateDb ethdb.Database, mux *event.TypeMux, chain BlockChain, lightchain LightChain, dropPeer peerDropFn, myshard uint64) *Downloader {
+func New(mode SyncMode, stateDb, refDb ethdb.Database, mux *event.TypeMux, chain, refchain BlockChain, lightchain LightChain, dropPeer peerDropFn, myshard uint64) *Downloader {
 	if lightchain == nil {
 		lightchain = chain
 	}
@@ -211,6 +213,7 @@ func New(mode SyncMode, stateDb ethdb.Database, mux *event.TypeMux, chain BlockC
 	dl := &Downloader{
 		mode:           mode,
 		stateDB:        stateDb,
+		refDB:          refDb,
 		mux:            mux,
 		queue:          newQueue(),
 		myshard:        myshard,
@@ -218,6 +221,7 @@ func New(mode SyncMode, stateDb ethdb.Database, mux *event.TypeMux, chain BlockC
 		rttEstimate:    uint64(rttMaxEstimate),
 		rttConfidence:  uint64(1000000),
 		blockchain:     chain,
+		refchain:       refchain,
 		lightchain:     lightchain,
 		dropPeer:       dropPeer,
 		headerCh:       make(chan dataPack, 1),
@@ -347,8 +351,8 @@ func (d *Downloader) UnregisterPeer(id string) error {
 
 // Synchronise tries to sync up our local block chain with a remote peer, both
 // adding various sanity checks as well as wrapping it with various log entries.
-func (d *Downloader) Synchronise(id string, head common.Hash, td *big.Int, mode SyncMode) error {
-	err := d.synchronise(id, head, td, mode)
+func (d *Downloader) Synchronise(ref bool, id string, head common.Hash, td *big.Int, mode SyncMode) error {
+	err := d.synchronise(ref, id, head, td, mode)
 	switch err {
 	case nil:
 	case errBusy:
@@ -370,10 +374,11 @@ func (d *Downloader) Synchronise(id string, head common.Hash, td *big.Int, mode 
 	return err
 }
 
+// @sourav, todo: fix this to handle reference block download
 // synchronise will select the peer and use it for synchronising. If an empty string is given
 // it will use the best peer possible and synchronize if its TD is higher than our own. If any of the
 // checks fail an error will be returned. This method is synchronous
-func (d *Downloader) synchronise(id string, hash common.Hash, td *big.Int, mode SyncMode) error {
+func (d *Downloader) synchronise(ref bool, id string, hash common.Hash, td *big.Int, mode SyncMode) error {
 	// Mock out the synchronisation if testing
 	if d.synchroniseMock != nil {
 		return d.synchroniseMock(id, hash)
@@ -442,12 +447,12 @@ func (d *Downloader) synchronise(id string, hash common.Hash, td *big.Int, mode 
 	if d.mode == BoundedFullSync {
 		return d.syncWithPeerUntil(p, hash, td)
 	}
-	return d.syncWithPeer(p, hash, td)
+	return d.syncWithPeer(ref, p, hash, td)
 }
 
 // syncWithPeer starts a block synchronization based on the hash chain from the
 // specified peer and head hash.
-func (d *Downloader) syncWithPeer(p *peerConnection, hash common.Hash, td *big.Int) (err error) {
+func (d *Downloader) syncWithPeer(ref bool, p *peerConnection, hash common.Hash, td *big.Int) (err error) {
 	d.mux.Post(StartEvent{})
 	defer func() {
 		// reset on error
@@ -467,7 +472,7 @@ func (d *Downloader) syncWithPeer(p *peerConnection, hash common.Hash, td *big.I
 	}(time.Now())
 
 	// Look up the sync boundaries: the common ancestor and the target block
-	latest, err := d.fetchHeight(p)
+	latest, err := d.fetchHeight(ref, p)
 	if err != nil {
 		return err
 	}
@@ -589,11 +594,11 @@ func (d *Downloader) Terminate() {
 
 // fetchHeight retrieves the head header of the remote peer to aid in estimating
 // the total time a pending synchronisation would take.
-func (d *Downloader) fetchHeight(p *peerConnection) (*types.Header, error) {
+func (d *Downloader) fetchHeight(ref bool, p *peerConnection) (*types.Header, error) {
 	p.log.Debug("Retrieving remote chain height")
 
 	// Request the advertised remote head block and wait for the response
-	head, _ := p.peer.Head()
+	head, _ := p.peer.Head(ref)
 	go p.peer.RequestHeadersByHash(head, 1, 0, false)
 
 	ttl := d.requestTTL()

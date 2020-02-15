@@ -206,11 +206,15 @@ func (sb *backend) verifyCascadingFields(chain consensus.ChainReader, header *ty
 	for i, validator := range snap.validators() {
 		copy(validators[i*common.AddressLength:], validator[:])
 	}
-	if err := sb.verifySigner(chain, header, parents); err != nil {
-		return err
-	}
 
-	return sb.verifyCommittedSeals(chain, header, parents)
+	ref := header.Shard == uint64(0) && sb.myShard > uint64(0)
+	if !ref {
+		if err := sb.verifySigner(chain, header, parents); err != nil {
+			return err
+		}
+		return sb.verifyCommittedSeals(chain, header, parents)
+	}
+	return nil
 }
 
 // VerifyHeaders is similar to VerifyHeader, but verifies a batch of headers
@@ -329,7 +333,11 @@ func (sb *backend) VerifySeal(chain consensus.ChainReader, header *types.Header)
 	if header.Difficulty.Cmp(defaultDifficulty) != 0 {
 		return errInvalidDifficulty
 	}
-	return sb.verifySigner(chain, header, nil)
+	ref := header.Shard == uint64(0) && sb.myShard > uint64(0)
+	if !ref {
+		return sb.verifySigner(chain, header, nil)
+	}
+	return nil
 }
 
 // Prepare initializes the consensus fields of a block header according to the
@@ -614,7 +622,13 @@ func (sb *backend) snapshot(chain consensus.ChainReader, number uint64, hash com
 	for i := 0; i < len(headers)/2; i++ {
 		headers[i], headers[len(headers)-1-i] = headers[len(headers)-1-i], headers[i]
 	}
-	snap, err := snap.apply(headers)
+	var ref bool
+	if len(headers) > 0 {
+		ref = headers[0].Shard == uint64(0) && sb.myShard > uint64(0)
+	} else {
+		ref = true
+	}
+	snap, err := snap.apply(ref, headers)
 	if err != nil {
 		return nil, err
 	}

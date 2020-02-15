@@ -75,18 +75,22 @@ type Ethereum struct {
 	// Handlers
 	txPool          *core.TxPool
 	blockchain      *core.BlockChain
+	refchain        *core.BlockChain
 	protocolManager *ProtocolManager
 	lesServer       LesServer
 
 	// DB interfaces
 	chainDb ethdb.Database // Block chain database
+	refDb   ethdb.Database // Reference chain database
 
 	eventMux       *event.TypeMux
 	engine         consensus.Engine
 	accountManager *accounts.Manager
 
 	bloomRequests chan chan *bloombits.Retrieval // Channel receiving bloom data retrieval requests
-	bloomIndexer  *core.ChainIndexer             // Bloom indexer operating during block imports
+	refRequests   chan chan *bloombits.Retrieval
+	bloomIndexer  *core.ChainIndexer // Bloom indexer operating during block imports
+	refIndexer    *core.ChainIndexer
 
 	APIBackend *EthAPIBackend
 
@@ -128,14 +132,22 @@ func New(ctx *node.ServiceContext, config *Config) (*Ethereum, error) {
 	}
 	// Assemble the Ethereum object
 	chainDb, err := CreateDB(ctx, config, "chaindata")
+	refDb, rerr := CreateDB(ctx, config, "lightchaindata")
 	if err != nil {
 		return nil, err
 	}
+	if rerr != nil {
+		return nil, rerr
+	}
+
 	chainConfig, genesisHash, genesisErr := core.SetupGenesisBlock(chainDb, config.Genesis)
+	refConfig, _, _ := core.SetupGenesisBlock(refDb, config.Genesis)
+
 	if _, ok := genesisErr.(*params.ConfigCompatError); genesisErr != nil && !ok {
 		return nil, genesisErr
 	}
 	log.Info("Initialised chain configuration", "config", chainConfig)
+	log.Info("Initialized reference chain configuration", "config", refConfig)
 
 	// changes to manipulate the chain id for migration from 2.0.2 and below version to 2.0.3
 	// version of Quorum  - this is applicable for v2.0.3 onwards
@@ -150,13 +162,19 @@ func New(ctx *node.ServiceContext, config *Config) (*Ethereum, error) {
 		core.WriteQuorumEIP155Activation(chainDb)
 	}
 
+	if !core.GetIsQuorumEIP155Activated(refDb) && refConfig.ChainID != nil {
+		//Upon starting the node, write the flag to disallow changing ChainID/EIP155 block after HF
+		core.WriteQuorumEIP155Activation(refDb)
+	}
+
 	eth := &Ethereum{
 		config:         config,
 		chainDb:        chainDb,
+		refDb:          refDb,
 		chainConfig:    chainConfig,
 		eventMux:       ctx.EventMux,
 		accountManager: ctx.AccountManager,
-		engine:         CreateConsensusEngine(ctx, chainConfig, config, config.MyShard, config.NumShard, config.MinerNotify, config.MinerNoverify, chainDb),
+		engine:         CreateConsensusEngine(ctx, chainConfig, config, config.MyShard, config.NumShard, config.MinerNotify, config.MinerNoverify, chainDb, refDb),
 		shutdownChan:   make(chan bool),
 		numShard:       config.NumShard,
 		myShard:        config.MyShard,
@@ -164,7 +182,9 @@ func New(ctx *node.ServiceContext, config *Config) (*Ethereum, error) {
 		gasPrice:       config.MinerGasPrice,
 		etherbase:      config.Etherbase,
 		bloomRequests:  make(chan chan *bloombits.Retrieval),
+		refRequests:    make(chan chan *bloombits.Retrieval),
 		bloomIndexer:   NewBloomIndexer(chainDb, params.BloomBitsBlocks, params.BloomConfirms),
+		refIndexer:     NewBloomIndexer(refDb, params.BloomBitsBlocks, params.BloomConfirms),
 		shardAddMap:    make(map[uint64]*big.Int),
 	}
 
@@ -205,7 +225,8 @@ func New(ctx *node.ServiceContext, config *Config) (*Ethereum, error) {
 		}
 		cacheConfig = &core.CacheConfig{Disabled: config.NoPruning, TrieNodeLimit: config.TrieCache, TrieTimeLimit: config.TrieTimeout}
 	)
-	eth.blockchain, err = core.NewBlockChain(chainDb, cacheConfig, eth.chainConfig, eth.engine, vmConfig, eth.shouldPreserve)
+	eth.blockchain, err = core.NewBlockChain(chainDb, cacheConfig, eth.chainConfig, eth.engine, vmConfig, eth.shouldPreserve, false)
+	eth.refchain, rerr = core.NewBlockChain(refDb, cacheConfig, eth.chainConfig, eth.engine, vmConfig, eth.shouldPreserve, true)
 	if err != nil {
 		return nil, err
 	}
@@ -216,13 +237,14 @@ func New(ctx *node.ServiceContext, config *Config) (*Ethereum, error) {
 		rawdb.WriteChainConfig(chainDb, genesisHash, chainConfig)
 	}
 	eth.bloomIndexer.Start(eth.blockchain)
+	eth.refIndexer.Start(eth.refchain)
 
 	if config.TxPool.Journal != "" {
 		config.TxPool.Journal = ctx.ResolvePath(config.TxPool.Journal)
 	}
 	eth.txPool = core.NewTxPool(config.TxPool, eth.chainConfig, eth.refAddress, eth.shardAddMap, eth.blockchain)
 
-	if eth.protocolManager, err = NewProtocolManager(eth.chainConfig, config.SyncMode, config.NumShard, config.MyShard, config.NetworkId, eth.eventMux, eth.txPool, eth.engine, eth.blockchain, eth.refAddress, eth.shardAddMap, chainDb, config.RaftMode); err != nil {
+	if eth.protocolManager, err = NewProtocolManager(eth.chainConfig, config.SyncMode, config.NumShard, config.MyShard, config.NetworkId, eth.eventMux, eth.txPool, eth.engine, eth.blockchain, eth.refchain, eth.refAddress, eth.shardAddMap, chainDb, refDb, config.RaftMode); err != nil {
 		return nil, err
 	}
 
@@ -270,7 +292,7 @@ func CreateDB(ctx *node.ServiceContext, config *Config, name string) (ethdb.Data
 }
 
 // CreateConsensusEngine creates the required type of consensus engine instance for an Ethereum service
-func CreateConsensusEngine(ctx *node.ServiceContext, chainConfig *params.ChainConfig, config *Config, myShard, numShard uint64, notify []string, noverify bool, db ethdb.Database) consensus.Engine {
+func CreateConsensusEngine(ctx *node.ServiceContext, chainConfig *params.ChainConfig, config *Config, myShard, numShard uint64, notify []string, noverify bool, db, refdb ethdb.Database) consensus.Engine {
 	// If proof-of-authority is requested, set it up
 	if chainConfig.Clique != nil {
 		return clique.New(chainConfig.Clique, db)
@@ -283,7 +305,7 @@ func CreateConsensusEngine(ctx *node.ServiceContext, chainConfig *params.ChainCo
 		config.Istanbul.ProposerPolicy = istanbul.ProposerPolicy(chainConfig.Istanbul.ProposerPolicy)
 		config.Istanbul.Ceil2Nby3Block = chainConfig.Istanbul.Ceil2Nby3Block
 
-		return istanbulBackend.New(&config.Istanbul, ctx.NodeKey(), myShard, numShard, db)
+		return istanbulBackend.New(&config.Istanbul, ctx.NodeKey(), myShard, numShard, db, refdb)
 	}
 
 	// Otherwise assume proof-of-work

@@ -17,6 +17,7 @@
 package eth
 
 import (
+	"math/big"
 	"math/rand"
 	"sync/atomic"
 	"time"
@@ -143,25 +144,36 @@ func (pm *ProtocolManager) syncer() {
 
 	for {
 		select {
-		case <-pm.newPeerCh:
+		case p := <-pm.newPeerCh:
+			peerShard := p.Shard()
 			// Make sure we have peers to select from, then sync
-			if pm.cousinPeers[pm.myshard] == nil {
-				pm.cousinPeers[pm.myshard] = newPeerSet()
+			if pm.cousinPeers[peerShard] == nil {
+				pm.cousinPeers[peerShard] = newPeerSet()
 			}
-			if pm.cousinPeers[pm.myshard].Len() < minDesiredPeerCount {
+			if pm.cousinPeers[peerShard].Len() < minDesiredPeerCount {
 				break
 			}
 			if !pm.raftMode {
-				go pm.synchronise(pm.cousinPeers[pm.myshard].BestPeer())
+				if peerShard == pm.myshard {
+					go pm.synchronise(false, pm.cousinPeers[pm.myshard].BestPeer(false))
+					go pm.synchronise(true, pm.cousinPeers[pm.myshard].BestPeer(true))
+				} else {
+					go pm.synchronise(true, pm.cousinPeers[peerShard].BestPeer(true))
+				}
 			}
 
 		case <-forceSync.C:
 			if !pm.raftMode {
-				if pm.cousinPeers[pm.myshard] == nil {
-					pm.cousinPeers[pm.myshard] = newPeerSet()
-				}
+
 				// Force a sync even if not enough peers are present
-				go pm.synchronise(pm.cousinPeers[pm.myshard].BestPeer())
+				for shard, peers := range pm.cousinPeers {
+					if shard == pm.myshard && peers != nil {
+						go pm.synchronise(false, peers.BestPeer(false))
+						go pm.synchronise(true, peers.BestPeer(true))
+					} else {
+						go pm.synchronise(true, peers.BestPeer(true))
+					}
+				}
 			}
 
 		case <-pm.noMorePeers:
@@ -171,16 +183,25 @@ func (pm *ProtocolManager) syncer() {
 }
 
 // synchronise tries to sync up our local block chain with a remote peer.
-func (pm *ProtocolManager) synchronise(peer *peer) {
+func (pm *ProtocolManager) synchronise(ref bool, peer *peer) {
 	// Short circuit if no peers are available
 	if peer == nil {
 		return
 	}
-	// Make sure the peer's TD is higher than our own
-	currentBlock := pm.blockchain.CurrentBlock()
-	td := pm.blockchain.GetTd(currentBlock.Hash(), currentBlock.NumberU64())
+	var (
+		currentBlock *types.Block
+		td           *big.Int
+	)
+	if ref {
+		currentBlock = pm.refchain.CurrentBlock()
+		td = pm.refchain.GetTd(currentBlock.Hash(), currentBlock.NumberU64())
+	} else {
+		// Make sure the peer's TD is higher than our own
+		currentBlock = pm.blockchain.CurrentBlock()
+		td = pm.blockchain.GetTd(currentBlock.Hash(), currentBlock.NumberU64())
+	}
 
-	pHead, pTd := peer.Head()
+	pHead, pTd := peer.Head(ref)
 	if pTd.Cmp(td) <= 0 {
 		types.SetSyncStatus()
 		return
@@ -190,7 +211,7 @@ func (pm *ProtocolManager) synchronise(peer *peer) {
 	if atomic.LoadUint32(&pm.fastSync) == 1 {
 		// Fast sync was explicitly requested, and explicitly granted
 		mode = downloader.FastSync
-	} else if currentBlock.NumberU64() == 0 && pm.blockchain.CurrentFastBlock().NumberU64() > 0 {
+	} else if currentBlock.NumberU64() == 0 && (pm.blockchain.CurrentFastBlock().NumberU64() > 0 || pm.refchain.CurrentFastBlock().NumberU64() > 0) {
 		// The database seems empty as the current block is the genesis. Yet the fast
 		// block is ahead, so fast sync was enabled for this node at a certain point.
 		// The only scenario where this can happen is if the user manually (or via a
@@ -201,14 +222,21 @@ func (pm *ProtocolManager) synchronise(peer *peer) {
 	}
 
 	if mode == downloader.FastSync {
-		// Make sure the peer's total difficulty we are synchronizing is higher.
-		if pm.blockchain.GetTdByHash(pm.blockchain.CurrentFastBlock().Hash()).Cmp(pTd) >= 0 {
-			return
+		if ref {
+			// Make sure the peer's total difficulty we are synchronizing is higher.
+			if pm.refchain.GetTdByHash(pm.refchain.CurrentFastBlock().Hash()).Cmp(pTd) >= 0 {
+				return
+			}
+		} else {
+			// Make sure the peer's total difficulty we are synchronizing is higher.
+			if pm.blockchain.GetTdByHash(pm.blockchain.CurrentFastBlock().Hash()).Cmp(pTd) >= 0 {
+				return
+			}
 		}
 	}
 
 	// Run the sync cycle, and disable fast sync if we've went past the pivot block
-	if err := pm.downloader.Synchronise(peer.id, pHead, pTd, mode); err != nil {
+	if err := pm.downloader.Synchronise(ref, peer.id, pHead, pTd, mode); err != nil {
 		return
 	}
 	if atomic.LoadUint32(&pm.fastSync) == 1 {
@@ -216,13 +244,25 @@ func (pm *ProtocolManager) synchronise(peer *peer) {
 		atomic.StoreUint32(&pm.fastSync, 0)
 	}
 	atomic.StoreUint32(&pm.acceptTxs, 1) // Mark initial sync done
-	if head := pm.blockchain.CurrentBlock(); head.NumberU64() > 0 {
-		// We've completed a sync cycle, notify all peers of new state. This path is
-		// essential in star-topology networks where a gateway node needs to notify
-		// all its out-of-date peers of the availability of a new block. This failure
-		// scenario will most often crop up in private and hackathon networks with
-		// degenerate connectivity, but it should be healthy for the mainnet too to
-		// more reliably update peers or the local TD state.
-		go pm.BroadcastBlock(head, false)
+	if ref {
+		if head := pm.refchain.CurrentBlock(); head.NumberU64() > 0 {
+			// We've completed a sync cycle, notify all peers of new state. This path is
+			// essential in star-topology networks where a gateway node needs to notify
+			// all its out-of-date peers of the availability of a new block. This failure
+			// scenario will most often crop up in private and hackathon networks with
+			// degenerate connectivity, but it should be healthy for the mainnet too to
+			// more reliably update peers or the local TD state.
+			go pm.BroadcastBlock(head, false)
+		}
+	} else {
+		if head := pm.blockchain.CurrentBlock(); head.NumberU64() > 0 {
+			// We've completed a sync cycle, notify all peers of new state. This path is
+			// essential in star-topology networks where a gateway node needs to notify
+			// all its out-of-date peers of the availability of a new block. This failure
+			// scenario will most often crop up in private and hackathon networks with
+			// degenerate connectivity, but it should be healthy for the mainnet too to
+			// more reliably update peers or the local TD state.
+			go pm.BroadcastBlock(head, false)
+		}
 	}
 }

@@ -53,16 +53,16 @@ type headerRequesterFn func(common.Hash) error
 type bodyRequesterFn func([]common.Hash) error
 
 // headerVerifierFn is a callback type to verify a block's header for fast propagation.
-type headerVerifierFn func(header *types.Header) error
+type headerVerifierFn func(ref bool, header *types.Header) error
 
 // blockBroadcasterFn is a callback type for broadcasting a block to connected peers.
 type blockBroadcasterFn func(block *types.Block, propagate bool)
 
 // chainHeightFn is a callback type to retrieve the current chain height.
-type chainHeightFn func() uint64
+type chainHeightFn func(ref bool) uint64
 
 // chainInsertFn is a callback type to insert a batch of blocks into the local chain.
-type chainInsertFn func(types.Blocks) (int, error)
+type chainInsertFn func(bool, types.Blocks) (int, error)
 
 // peerDropFn is a callback type for dropping a peer detected as malicious.
 type peerDropFn func(id string)
@@ -70,7 +70,8 @@ type peerDropFn func(id string)
 // announce is the hash notification of the availability of a new block in the
 // network.
 type announce struct {
-	hash   common.Hash   // Hash of the block being announced
+	hash   common.Hash // Hash of the block being announced
+	ref    bool
 	number uint64        // Number of the block being announced (0 = unknown | old protocol)
 	header *types.Header // Header of the block partially reassembled (new protocol)
 	time   time.Time     // Timestamp of the announcement
@@ -106,6 +107,8 @@ type inject struct {
 // Fetcher is responsible for accumulating block announcements from various peers
 // and scheduling them for retrieval.
 type Fetcher struct {
+	// My shard id
+	myshard uint64
 	// Various event channels
 	notify chan *announce
 	inject chan *inject
@@ -131,6 +134,7 @@ type Fetcher struct {
 
 	// Callbacks
 	getBlock       blockRetrievalFn   // Retrieves a block from the local chain
+	rGetBlock      blockRetrievalFn   // Retrieves a block from the local chain
 	verifyHeader   headerVerifierFn   // Checks if a block's headers have a valid proof of work
 	broadcastBlock blockBroadcasterFn // Broadcasts a block to connected peers
 	chainHeight    chainHeightFn      // Retrieves the current chain's height
@@ -146,7 +150,7 @@ type Fetcher struct {
 }
 
 // New creates a block fetcher to retrieve blocks based on hash announcements.
-func New(getBlock blockRetrievalFn, verifyHeader headerVerifierFn, broadcastBlock blockBroadcasterFn, chainHeight chainHeightFn, insertChain chainInsertFn, dropPeer peerDropFn) *Fetcher {
+func New(getBlock, rGetBlock blockRetrievalFn, verifyHeader headerVerifierFn, broadcastBlock blockBroadcasterFn, chainHeight chainHeightFn, insertChain chainInsertFn, dropPeer peerDropFn, myshard uint64) *Fetcher {
 	return &Fetcher{
 		notify:         make(chan *announce),
 		inject:         make(chan *inject),
@@ -163,7 +167,9 @@ func New(getBlock blockRetrievalFn, verifyHeader headerVerifierFn, broadcastBloc
 		queue:          prque.New(nil),
 		queues:         make(map[string]int),
 		queued:         make(map[common.Hash]*inject),
+		myshard:        myshard,
 		getBlock:       getBlock,
+		rGetBlock:      rGetBlock,
 		verifyHeader:   verifyHeader,
 		broadcastBlock: broadcastBlock,
 		chainHeight:    chainHeight,
@@ -186,10 +192,11 @@ func (f *Fetcher) Stop() {
 
 // Notify announces the fetcher of the potential availability of a new block in
 // the network.
-func (f *Fetcher) Notify(peer string, hash common.Hash, number uint64, time time.Time,
+func (f *Fetcher) Notify(peer string, ref bool, hash common.Hash, number uint64, time time.Time,
 	headerFetcher headerRequesterFn, bodyFetcher bodyRequesterFn) error {
 	block := &announce{
 		hash:        hash,
+		ref:         ref,
 		number:      number,
 		time:        time,
 		origin:      peer,
@@ -274,12 +281,24 @@ func (f *Fetcher) FilterBodies(peer string, transactions [][]*types.Transaction,
 	}
 }
 
+func (f *Fetcher) localGetBlock(ref bool, hash common.Hash) *types.Block {
+	if ref {
+		return f.rGetBlock(hash)
+	}
+	return f.getBlock(hash)
+}
+
 // Loop is the main fetcher loop, checking and processing various notification
 // events.
 func (f *Fetcher) loop() {
 	// Iterate the block fetching until a quit is requested
 	fetchTimer := time.NewTimer(0)
 	completeTimer := time.NewTimer(0)
+	var (
+		height  uint64 // Block height in mainchain
+		rHeight uint64 // Height of block in refchain
+		cHeight uint64 // Height currently considerd block
+	)
 
 	for {
 		// Clean up any expired block fetches
@@ -288,8 +307,13 @@ func (f *Fetcher) loop() {
 				f.forgetHash(hash)
 			}
 		}
+
 		// Import any queued blocks that could potentially fit
-		height := f.chainHeight()
+		height = f.chainHeight(false)
+		if f.myshard > 0 {
+			rHeight = f.chainHeight(true)
+		}
+
 		for !f.queue.Empty() {
 			op := f.queue.PopItem().(*inject)
 			hash := op.block.Hash()
@@ -298,7 +322,13 @@ func (f *Fetcher) loop() {
 			}
 			// If too high up the chain or phase, continue later
 			number := op.block.NumberU64()
-			if number > height+1 {
+			ref := f.myshard > uint64(0) && op.block.Shard() == uint64(0)
+			cHeight = height
+			if ref {
+				cHeight = rHeight
+			}
+
+			if number > cHeight+1 {
 				f.queue.Push(op, -int64(number))
 				if f.queueChangeHook != nil {
 					f.queueChangeHook(hash, true)
@@ -306,7 +336,7 @@ func (f *Fetcher) loop() {
 				break
 			}
 			// Otherwise if fresh and still unknown, try and import
-			if number+maxUncleDist < height || f.getBlock(hash) != nil {
+			if number+maxUncleDist < cHeight || f.localGetBlock(ref, hash) != nil {
 				f.forgetBlock(hash)
 				continue
 			}
@@ -330,7 +360,7 @@ func (f *Fetcher) loop() {
 			}
 			// If we have a valid block number, check that it's potentially useful
 			if notification.number > 0 {
-				if dist := int64(notification.number) - int64(f.chainHeight()); dist < -maxUncleDist || dist > maxQueueDist {
+				if dist := int64(notification.number) - int64(f.chainHeight(notification.ref)); dist < -maxUncleDist || dist > maxQueueDist {
 					log.Debug("Peer discarded announcement", "peer", notification.origin, "number", notification.number, "hash", notification.hash, "distance", dist)
 					propAnnounceDropMeter.Mark(1)
 					break
@@ -610,7 +640,8 @@ func (f *Fetcher) enqueue(peer string, block *types.Block) {
 		return
 	}
 	// Discard any past or too distant blocks
-	if dist := int64(block.NumberU64()) - int64(f.chainHeight()); dist < -maxUncleDist || dist > maxQueueDist {
+	ref := f.myshard > uint64(0) && block.Shard() == uint64(0)
+	if dist := int64(block.NumberU64()) - int64(f.chainHeight(ref)); dist < -maxUncleDist || dist > maxQueueDist {
 		log.Debug("Discarded propagated block, too far away", "peer", peer, "number", block.Number(), "hash", hash, "distance", dist)
 		propBroadcastDropMeter.Mark(1)
 		f.forgetHash(hash)
@@ -639,18 +670,19 @@ func (f *Fetcher) insert(peer string, block *types.Block) {
 	hash := block.Hash()
 
 	// Run the import on a new thread
-	log.Debug("Importing propagated block", "peer", peer, "number", block.Number(), "hash", hash)
+	log.Debug("Importing propagated block", "peer", peer, "number", block.Number(), "bs", block.Shard(), "hash", hash)
 	go func() {
 		defer func() { f.done <- hash }()
 
+		ref := f.myshard > uint64(0) && block.Shard() == uint64(0)
 		// If the parent's unknown, abort insertion
-		parent := f.getBlock(block.ParentHash())
+		parent := f.localGetBlock(ref, block.ParentHash())
 		if parent == nil {
 			log.Debug("Unknown parent of propagated block", "peer", peer, "number", block.Number(), "hash", hash, "parent", block.ParentHash())
 			return
 		}
 		// Quickly validate the header and propagate the block if it passes
-		switch err := f.verifyHeader(block.Header()); err {
+		switch err := f.verifyHeader(ref, block.Header()); err {
 		case nil:
 			// All ok, quickly propagate to our peers
 			propBroadcastOutTimer.UpdateSince(block.ReceivedAt)
@@ -666,7 +698,7 @@ func (f *Fetcher) insert(peer string, block *types.Block) {
 			return
 		}
 		// Run the actual import and log any issues
-		if _, err := f.insertChain(types.Blocks{block}); err != nil {
+		if _, err := f.insertChain(ref, types.Blocks{block}); err != nil {
 			log.Debug("Propagated block import failed", "peer", peer, "number", block.Number(), "hash", hash, "err", err)
 			return
 		}

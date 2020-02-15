@@ -160,7 +160,7 @@ func (s *Snapshot) uncast(address common.Address, authorize bool) bool {
 
 // apply creates a new authorization snapshot by applying the given headers to
 // the original one.
-func (s *Snapshot) apply(headers []*types.Header) (*Snapshot, error) {
+func (s *Snapshot) apply(ref bool, headers []*types.Header) (*Snapshot, error) {
 	// Allow passing in no headers for cleaner code
 	if len(headers) == 0 {
 		return s, nil
@@ -189,8 +189,10 @@ func (s *Snapshot) apply(headers []*types.Header) (*Snapshot, error) {
 		if err != nil {
 			return nil, err
 		}
-		if _, v := snap.ValSet.GetByAddress(validator); v == nil {
-			return nil, errUnauthorized
+		if !ref {
+			if _, v := snap.ValSet.GetByAddress(validator); v == nil {
+				return nil, errUnauthorized
+			}
 		}
 
 		// Header authorized, discard any previous votes from the validator

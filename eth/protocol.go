@@ -116,12 +116,15 @@ type statusData struct {
 	ShardId         uint64
 	NetworkId       uint64
 	TD              *big.Int
+	RTD             *big.Int
 	CurrentBlock    common.Hash
+	RCurrentBlock   common.Hash
 	GenesisBlock    common.Hash
 }
 
 // newBlockHashesData is the network packet for the block announcements.
 type newBlockHashesData []struct {
+	Ref    bool
 	Hash   common.Hash // Hash of one particular block being announced
 	Number uint64      // Number of one particular block being announced
 }
