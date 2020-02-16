@@ -4,7 +4,6 @@ import (
 	"crypto/ecdsa"
 	"encoding/json"
 	"fmt"
-	"github.com/ethereum/go-ethereum/core"
 	"io/ioutil"
 	"math/big"
 	"os"
@@ -12,6 +11,8 @@ import (
 	"reflect"
 	"sync"
 	"time"
+
+	"github.com/ethereum/go-ethereum/core"
 
 	"github.com/ethereum/go-ethereum/ethclient"
 
@@ -228,7 +229,7 @@ func (p *PermissionCtrl) asyncStart() {
 		for {
 			select {
 			case <-pollingTicker.C:
-				if types.GetSyncStatus() && !ethereum.Downloader().Synchronising() {
+				if types.GetSyncStatus(false) && !ethereum.Downloader().Synchronising(false) {
 					return
 				}
 			case <-stopChan:
@@ -296,7 +297,7 @@ func (p *PermissionCtrl) monitorQIP714Block() error {
 		defer stopSubscription.Unsubscribe()
 		for {
 			select {
-			case  head := <-chainHeadCh:
+			case head := <-chainHeadCh:
 				if p.eth.ChainConfig().IsQIP714(head.Block.Number()) {
 					types.SetDefaultAccess()
 					return

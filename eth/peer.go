@@ -367,9 +367,9 @@ func (p *peer) RequestHeadersByHash(origin common.Hash, amount int, skip int, re
 
 // RequestHeadersByNumber fetches a batch of blocks' headers corresponding to the
 // specified header query, based on the number of an origin block.
-func (p *peer) RequestHeadersByNumber(origin uint64, amount int, skip int, reverse bool) error {
+func (p *peer) RequestHeadersByNumber(shard uint64, origin uint64, amount int, skip int, reverse bool) error {
 	p.Log().Debug("Fetching batch of headers", "count", amount, "fromnum", origin, "skip", skip, "reverse", reverse)
-	return p2p.Send(p.rw, GetBlockHeadersMsg, &getBlockHeadersData{Origin: hashOrNumber{Number: origin}, Amount: uint64(amount), Skip: uint64(skip), Reverse: reverse})
+	return p2p.Send(p.rw, GetBlockHeadersMsg, &getBlockHeadersData{Origin: hashOrNumber{Number: origin}, Amount: uint64(amount), Skip: uint64(skip), Reverse: reverse, Shard: shard})
 }
 
 // RequestBodies fetches a batch of blocks' bodies corresponding to the hashes

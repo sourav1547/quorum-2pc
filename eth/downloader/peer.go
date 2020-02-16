@@ -79,7 +79,7 @@ type peerConnection struct {
 type LightPeer interface {
 	Head(bool) (common.Hash, *big.Int)
 	RequestHeadersByHash(common.Hash, int, int, bool) error
-	RequestHeadersByNumber(uint64, int, int, bool) error
+	RequestHeadersByNumber(uint64, uint64, int, int, bool) error
 	Shard() uint64
 }
 
@@ -100,8 +100,8 @@ func (w *lightPeerWrapper) Head(ref bool) (common.Hash, *big.Int) { return w.pee
 func (w *lightPeerWrapper) RequestHeadersByHash(h common.Hash, amount int, skip int, reverse bool) error {
 	return w.peer.RequestHeadersByHash(h, amount, skip, reverse)
 }
-func (w *lightPeerWrapper) RequestHeadersByNumber(i uint64, amount int, skip int, reverse bool) error {
-	return w.peer.RequestHeadersByNumber(i, amount, skip, reverse)
+func (w *lightPeerWrapper) RequestHeadersByNumber(shard uint64, i uint64, amount int, skip int, reverse bool) error {
+	return w.peer.RequestHeadersByNumber(shard, i, amount, skip, reverse)
 }
 func (w *lightPeerWrapper) RequestBodies([]common.Hash) error {
 	panic("RequestBodies not supported in light client mode sync")
@@ -145,7 +145,7 @@ func (p *peerConnection) Reset() {
 }
 
 // FetchHeaders sends a header retrieval request to the remote peer.
-func (p *peerConnection) FetchHeaders(from uint64, count int) error {
+func (p *peerConnection) FetchHeaders(shard uint64, from uint64, count int) error {
 	// Sanity check the protocol version
 	if p.version < 62 {
 		panic(fmt.Sprintf("header fetch [eth/62+] requested on eth/%d", p.version))
@@ -157,7 +157,7 @@ func (p *peerConnection) FetchHeaders(from uint64, count int) error {
 	p.headerStarted = time.Now()
 
 	// Issue the header retrieval request (absolut upwards without gaps)
-	go p.peer.RequestHeadersByNumber(from, count, 0, false)
+	go p.peer.RequestHeadersByNumber(shard, from, count, 0, false)
 
 	return nil
 }

@@ -203,7 +203,7 @@ func (pm *ProtocolManager) synchronise(ref bool, peer *peer) {
 
 	pHead, pTd := peer.Head(ref)
 	if pTd.Cmp(td) <= 0 {
-		types.SetSyncStatus()
+		types.SetSyncStatus(ref)
 		return
 	}
 	// Otherwise try to sync with the downloader

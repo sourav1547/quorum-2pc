@@ -420,7 +420,7 @@ func copyDb(ctx *cli.Context) error {
 	if err = dl.Synchronise(false, "local", currentHeader.Hash(), hc.GetTd(currentHeader.Hash(), currentHeader.Number.Uint64()), syncmode); err != nil {
 		return err
 	}
-	for dl.Synchronising() {
+	for dl.Synchronising(false) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	fmt.Printf("Database copy done in %v\n", time.Since(start))

@@ -166,6 +166,7 @@ func NewAcctCache() *AcctCache {
 }
 
 var syncStarted = false
+var rsyncStarted = false // For reference chain
 
 var DefaultAccess = FullAccess
 var QIP714BlockReached = false
@@ -186,16 +187,24 @@ func (pc *PermissionConfig) IsEmpty() bool {
 	return pc.InterfAddress == common.HexToAddress("0x0")
 }
 
-func SetSyncStatus() {
-	syncStarted = true
+// SetSyncStatus sets the current syncing status.
+func SetSyncStatus(ref bool) {
+	if ref {
+		rsyncStarted = true
+	} else {
+		syncStarted = true
+	}
 }
 
-func GetSyncStatus() bool {
+func GetSyncStatus(ref bool) bool {
+	if ref {
+		return rsyncStarted
+	}
 	return syncStarted
 }
 
 // sets the default access to Readonly upon QIP714Blokc
-func SetDefaultAccess(){
+func SetDefaultAccess() {
 	DefaultAccess = ReadOnly
 	QIP714BlockReached = true
 }
@@ -393,7 +402,7 @@ func GetAcctAccess(acctId common.Address) AccessType {
 }
 
 func ValidateNodeForTxn(hexnodeId string, from common.Address) bool {
-	if !QIP714BlockReached || hexnodeId == ""{
+	if !QIP714BlockReached || hexnodeId == "" {
 		return true
 	}
 

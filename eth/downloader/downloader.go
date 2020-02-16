@@ -72,6 +72,7 @@ var (
 
 var (
 	errBusy                    = errors.New("busy")
+	rerrBusy                   = errors.New("ref busy")
 	errUnknownPeer             = errors.New("peer is unknown or unhealthy")
 	errBadPeer                 = errors.New("action from bad peer ignored")
 	errStallingPeer            = errors.New("peer is stalling")
@@ -100,6 +101,7 @@ type Downloader struct {
 	mux  *event.TypeMux // Event multiplexer to announce sync operation events
 
 	queue          *queue // Scheduler for selecting the hashes to download
+	rqueue         *queue
 	myshard        uint64
 	cousinPeers    map[uint64]*peerSet
 	cousinPeerLock sync.RWMutex
@@ -125,6 +127,7 @@ type Downloader struct {
 	// Status
 	synchroniseMock func(id string, hash common.Hash) error // Replacement for synchronise during testing
 	synchronising   int32
+	rsynchronising  int32
 	notified        int32
 	committed       int32
 
@@ -216,6 +219,7 @@ func New(mode SyncMode, stateDb, refDb ethdb.Database, mux *event.TypeMux, chain
 		refDB:          refDb,
 		mux:            mux,
 		queue:          newQueue(),
+		rqueue:         newQueue(),
 		myshard:        myshard,
 		cousinPeers:    make(map[uint64]*peerSet),
 		rttEstimate:    uint64(rttMaxEstimate),
@@ -274,7 +278,10 @@ func (d *Downloader) Progress() ethereum.SyncProgress {
 }
 
 // Synchronising returns whether the downloader is currently retrieving blocks.
-func (d *Downloader) Synchronising() bool {
+func (d *Downloader) Synchronising(ref bool) bool {
+	if ref {
+		return atomic.LoadInt32(&d.rsynchronising) > 0
+	}
 	return atomic.LoadInt32(&d.synchronising) > 0
 }
 
@@ -337,6 +344,7 @@ func (d *Downloader) UnregisterPeer(id string) error {
 	}
 	d.cousinPeerLock.Unlock()
 	d.queue.Revoke(id)
+	d.rqueue.Revoke(id)
 
 	// If this peer was the master peer, abort sync immediately
 	d.cancelLock.RLock()
@@ -383,22 +391,41 @@ func (d *Downloader) synchronise(ref bool, id string, hash common.Hash, td *big.
 	if d.synchroniseMock != nil {
 		return d.synchroniseMock(id, hash)
 	}
-	// Make sure only one goroutine is ever allowed past this point at once
-	if !atomic.CompareAndSwapInt32(&d.synchronising, 0, 1) {
-		return errBusy
-	}
+
+	// Make sure only one goroutine for each chain is ever allowed past this point at once
 	// changes for permissions. added set sync status to indicate permisssions that node sync has started
-	types.SetSyncStatus()
-	defer atomic.StoreInt32(&d.synchronising, 0)
+	if ref {
+		if !atomic.CompareAndSwapInt32(&d.rsynchronising, 0, 1) {
+			return rerrBusy
+		}
+		types.SetSyncStatus(ref)
+		defer atomic.StoreInt32(&d.rsynchronising, 0)
+	} else {
+		if !atomic.CompareAndSwapInt32(&d.synchronising, 0, 1) {
+			return errBusy
+		}
+		types.SetSyncStatus(ref)
+		defer atomic.StoreInt32(&d.synchronising, 0)
+	}
 
 	// Post a user notification of the sync (only once per session)
 	if atomic.CompareAndSwapInt32(&d.notified, 0, 1) {
 		log.Info("Block synchronisation started")
 	}
 	// Reset the queue, peer set and wake channels to clean any internal leftover state
-	d.queue.Reset()
+	if ref {
+		d.rqueue.Reset()
+	} else {
+		d.queue.Reset()
+	}
+
 	d.cousinPeerLock.Lock()
-	for _, peers := range d.cousinPeers {
+	if ref {
+		for _, peers := range d.cousinPeers {
+			peers.Reset()
+		}
+	} else {
+		peers := d.cousinPeers[d.myshard]
 		peers.Reset()
 	}
 	d.cousinPeerLock.Unlock()
@@ -445,7 +472,7 @@ func (d *Downloader) synchronise(ref bool, id string, hash common.Hash, td *big.
 		return errUnknownPeer
 	}
 	if d.mode == BoundedFullSync {
-		return d.syncWithPeerUntil(p, hash, td)
+		return d.syncWithPeerUntil(ref, p, hash, td)
 	}
 	return d.syncWithPeer(ref, p, hash, td)
 }
@@ -478,7 +505,7 @@ func (d *Downloader) syncWithPeer(ref bool, p *peerConnection, hash common.Hash,
 	}
 	height := latest.Number.Uint64()
 
-	origin, err := d.findAncestor(p, height)
+	origin, err := d.findAncestor(ref, p, height)
 	if err != nil {
 		return err
 	}
@@ -512,9 +539,9 @@ func (d *Downloader) syncWithPeer(ref bool, p *peerConnection, hash common.Hash,
 	}
 
 	fetchers := []func() error{
-		func() error { return d.fetchHeaders(p, origin+1, pivot) }, // Headers are always retrieved
-		func() error { return d.fetchBodies(origin + 1) },          // Bodies are retrieved during normal and fast sync
-		func() error { return d.fetchReceipts(origin + 1) },        // Receipts are retrieved during fast sync
+		func() error { return d.fetchHeaders(ref, p, origin+1, pivot) }, // Headers are always retrieved
+		func() error { return d.fetchBodies(origin + 1) },               // Bodies are retrieved during normal and fast sync
+		func() error { return d.fetchReceipts(origin + 1) },             // Receipts are retrieved during fast sync
 		func() error { return d.processHeaders(origin+1, pivot, td) },
 	}
 	if d.mode == FastSync {
@@ -617,7 +644,7 @@ func (d *Downloader) fetchHeight(ref bool, p *peerConnection) (*types.Header, er
 			// Make sure the peer actually gave something valid
 			headers := packet.(*headerPack).headers
 			if len(headers) != 1 {
-				p.log.Debug("Multiple headers for single request", "headers", len(headers))
+				p.log.Debug("fetchHeight, Multiple headers for single request", "headers", len(headers))
 				return nil, errBadPeer
 			}
 			head := headers[0]
@@ -640,15 +667,33 @@ func (d *Downloader) fetchHeight(ref bool, p *peerConnection) (*types.Header, er
 // on the correct chain, checking the top N links should already get us a match.
 // In the rare scenario when we ended up on a long reorganisation (i.e. none of
 // the head links match), we do a binary search to find the common ancestor.
-func (d *Downloader) findAncestor(p *peerConnection, height uint64) (uint64, error) {
+func (d *Downloader) findAncestor(ref bool, p *peerConnection, height uint64) (uint64, error) {
+
+	var (
+		floor int64
+		ceil  uint64
+	)
 	// Figure out the valid ancestor range to prevent rewrite attacks
-	floor, ceil := int64(-1), d.lightchain.CurrentHeader().Number.Uint64()
+	if ref {
+		floor, ceil = int64(-1), d.refchain.CurrentHeader().Number.Uint64()
+	} else {
+		floor, ceil = int64(-1), d.lightchain.CurrentHeader().Number.Uint64()
+	}
 
 	if d.mode == FullSync {
-		ceil = d.blockchain.CurrentBlock().NumberU64()
+		if ref {
+			ceil = d.refchain.CurrentBlock().NumberU64()
+		} else {
+			ceil = d.blockchain.CurrentBlock().NumberU64()
+		}
 	} else if d.mode == FastSync {
-		ceil = d.blockchain.CurrentFastBlock().NumberU64()
+		if ref {
+			ceil = d.blockchain.CurrentFastBlock().NumberU64()
+		} else {
+			ceil = d.refchain.CurrentFastBlock().NumberU64()
+		}
 	}
+
 	if ceil >= MaxForkAncestry {
 		floor = int64(ceil - MaxForkAncestry)
 	}
@@ -669,7 +714,14 @@ func (d *Downloader) findAncestor(p *peerConnection, height uint64) (uint64, err
 	if count > limit {
 		count = limit
 	}
-	go p.peer.RequestHeadersByNumber(uint64(from), count, 15, false)
+
+	var bshard uint64
+	if ref {
+		bshard = uint64(0)
+	} else {
+		bshard = d.myshard
+	}
+	go p.peer.RequestHeadersByNumber(bshard, uint64(from), count, 15, false)
 
 	// Wait for the remote response to the head fetch
 	number, hash := uint64(0), common.Hash{}
@@ -711,16 +763,30 @@ func (d *Downloader) findAncestor(p *peerConnection, height uint64) (uint64, err
 				// Otherwise check if we already know the header or not
 				h := headers[i].Hash()
 				n := headers[i].Number.Uint64()
-				if (d.mode == FullSync && d.blockchain.HasBlock(h, n)) || (d.mode != FullSync && d.lightchain.HasHeader(h, n)) {
-					number, hash = n, h
+				if !ref {
+					if (d.mode == FullSync && d.blockchain.HasBlock(h, n)) || (d.mode != FullSync && d.lightchain.HasHeader(h, n)) {
+						number, hash = n, h
 
-					// If every header is known, even future ones, the peer straight out lied about its head
-					if number > height && i == limit-1 {
-						p.log.Warn("Lied about chain head", "reported", height, "found", number)
-						return 0, errStallingPeer
+						// If every header is known, even future ones, the peer straight out lied about its head
+						if number > height && i == limit-1 {
+							p.log.Warn("Lied about chain head", "reported", height, "found", number)
+							return 0, errStallingPeer
+						}
+						break
 					}
-					break
+				} else {
+					if d.mode == FullSync && d.refchain.HasBlock(h, n) {
+						number, hash = n, h
+
+						// If every header is known, even future ones, the peer straight out lied about its head
+						if number > height && i == limit-1 {
+							p.log.Warn("Lied about chain head", "reported", height, "found", number)
+							return 0, errStallingPeer
+						}
+						break
+					}
 				}
+
 			}
 
 		case <-timeout:
@@ -753,7 +819,7 @@ func (d *Downloader) findAncestor(p *peerConnection, height uint64) (uint64, err
 		ttl := d.requestTTL()
 		timeout := time.After(ttl)
 
-		go p.peer.RequestHeadersByNumber(check, 1, 0, false)
+		go p.peer.RequestHeadersByNumber(bshard, check, 1, 0, false)
 
 		// Wait until a reply arrives to this request
 		for arrived := false; !arrived; {
@@ -770,7 +836,7 @@ func (d *Downloader) findAncestor(p *peerConnection, height uint64) (uint64, err
 				// Make sure the peer actually gave something valid
 				headers := packer.(*headerPack).headers
 				if len(headers) != 1 {
-					p.log.Debug("Multiple headers for single request", "headers", len(headers))
+					p.log.Debug("findAncestor, Multiple headers for single request", "headers", len(headers))
 					return 0, errBadPeer
 				}
 				arrived = true
@@ -778,15 +844,28 @@ func (d *Downloader) findAncestor(p *peerConnection, height uint64) (uint64, err
 				// Modify the search interval based on the response
 				h := headers[0].Hash()
 				n := headers[0].Number.Uint64()
-				if (d.mode == FullSync && !d.blockchain.HasBlock(h, n)) || (d.mode != FullSync && !d.lightchain.HasHeader(h, n)) {
-					end = check
-					break
+				if ref {
+					if d.mode == FullSync && !d.refchain.HasBlock(h, n) {
+						end = check
+						break
+					}
+					header := d.lightchain.GetHeaderByHash(h) // Independent of sync mode, header surely exists
+					if header.Number.Uint64() != check {
+						p.log.Debug("Received non requested header", "number", header.Number, "hash", header.Hash(), "request", check)
+						return 0, errBadPeer
+					}
+				} else {
+					if (d.mode == FullSync && !d.blockchain.HasBlock(h, n)) || (d.mode != FullSync && !d.lightchain.HasHeader(h, n)) {
+						end = check
+						break
+					}
+					header := d.lightchain.GetHeaderByHash(h) // Independent of sync mode, header surely exists
+					if header.Number.Uint64() != check {
+						p.log.Debug("Received non requested header", "number", header.Number, "hash", header.Hash(), "request", check)
+						return 0, errBadPeer
+					}
 				}
-				header := d.lightchain.GetHeaderByHash(h) // Independent of sync mode, header surely exists
-				if header.Number.Uint64() != check {
-					p.log.Debug("Received non requested header", "number", header.Number, "hash", header.Hash(), "request", check)
-					return 0, errBadPeer
-				}
+
 				start = check
 				hash = h
 
@@ -817,7 +896,7 @@ func (d *Downloader) findAncestor(p *peerConnection, height uint64) (uint64, err
 // other peers are only accepted if they map cleanly to the skeleton. If no one
 // can fill in the skeleton - not even the origin peer - it's assumed invalid and
 // the origin is dropped.
-func (d *Downloader) fetchHeaders(p *peerConnection, from uint64, pivot uint64) error {
+func (d *Downloader) fetchHeaders(ref bool, p *peerConnection, from uint64, pivot uint64) error {
 	p.log.Debug("Directing header downloads", "origin", from)
 	defer p.log.Debug("Header download terminated")
 
@@ -835,12 +914,19 @@ func (d *Downloader) fetchHeaders(p *peerConnection, from uint64, pivot uint64) 
 		ttl = d.requestTTL()
 		timeout.Reset(ttl)
 
+		var cshard uint64
+		if ref {
+			cshard = uint64(0)
+		} else {
+			cshard = d.myshard
+		}
+
 		if skeleton {
 			p.log.Trace("Fetching skeleton headers", "count", MaxHeaderFetch, "from", from)
-			go p.peer.RequestHeadersByNumber(from+uint64(MaxHeaderFetch)-1, MaxSkeletonSize, MaxHeaderFetch-1, false)
+			go p.peer.RequestHeadersByNumber(cshard, from+uint64(MaxHeaderFetch)-1, MaxSkeletonSize, MaxHeaderFetch-1, false)
 		} else {
 			p.log.Trace("Fetching full headers", "count", MaxHeaderFetch, "from", from)
-			go p.peer.RequestHeadersByNumber(from, MaxHeaderFetch, 0, false)
+			go p.peer.RequestHeadersByNumber(cshard, from, MaxHeaderFetch, 0, false)
 		}
 	}
 	// Start pulling the header chain skeleton until all is done
@@ -997,7 +1083,9 @@ func (d *Downloader) fillHeaderSkeleton(from uint64, skeleton []*types.Header) (
 		reserve  = func(p *peerConnection, count int) (*fetchRequest, bool, error) {
 			return d.queue.ReserveHeaders(p, count), false, nil
 		}
-		fetch    = func(p *peerConnection, req *fetchRequest) error { return p.FetchHeaders(req.From, MaxHeaderFetch) }
+		fetch = func(p *peerConnection, req *fetchRequest) error {
+			return p.FetchHeaders(d.myshard, req.From, MaxHeaderFetch)
+		}
 		capacity = func(p *peerConnection) int { return p.HeaderCapacity(d.requestRTT()) }
 		setIdle  = func(p *peerConnection, accepted int) { p.SetHeadersIdle(accepted) }
 	)
@@ -1748,7 +1836,7 @@ func (d *Downloader) requestTTL() time.Duration {
 // Extra downloader functionality for non-proof-of-work consensus
 
 // Synchronizes with a peer, but only up to the provided Hash
-func (d *Downloader) syncWithPeerUntil(p *peerConnection, hash common.Hash, td *big.Int) (err error) {
+func (d *Downloader) syncWithPeerUntil(ref bool, p *peerConnection, hash common.Hash, td *big.Int) (err error) {
 	d.mux.Post(StartEvent{})
 	defer func() {
 		// reset on error
@@ -1873,14 +1961,14 @@ func (d *Downloader) fetchBoundedHeaders(p *peerConnection, from uint64, to uint
 		if skeleton {
 			numSkeletonHeaders := minInt(MaxSkeletonSize, (int(to-from)+1)/MaxHeaderFetch)
 			log.Trace("fetching skeleton headers", "peer", p, "num skeleton headers", numSkeletonHeaders, "from", from)
-			go p.peer.RequestHeadersByNumber(skeletonStart, numSkeletonHeaders, MaxHeaderFetch-1, false)
+			go p.peer.RequestHeadersByNumber(d.myshard, skeletonStart, numSkeletonHeaders, MaxHeaderFetch-1, false)
 		} else {
 			// There are not enough headers remaining to warrant a skeleton fetch.
 			// Grab all of the remaining headers.
 
 			numHeaders := int(to-from) + 1
 			log.Trace("fetching full headers", "peer", p, "num headers", numHeaders, "from", from)
-			go p.peer.RequestHeadersByNumber(from, numHeaders, 0, false)
+			go p.peer.RequestHeadersByNumber(d.myshard, from, numHeaders, 0, false)
 		}
 	}
 	// Start pulling the header chain skeleton until all is done
