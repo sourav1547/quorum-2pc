@@ -65,6 +65,7 @@ func New(eth Backend, config *params.ChainConfig, mux *event.TypeMux, engine con
 		canStart: 1,
 	}
 	go miner.update()
+	go miner.rUpdate()
 
 	return miner
 }
@@ -100,6 +101,32 @@ func (self *Miner) update() {
 					self.Start(self.coinbase)
 				}
 				// stop immediately and ignore all further pending events
+				return
+			}
+		case <-self.exitCh:
+			return
+		}
+	}
+}
+
+// rUpdate To track reference chain synchronization event.
+func (self *Miner) rUpdate() {
+	events := self.mux.Subscribe(downloader.RStartEvent{}, downloader.RDoneEvent{}, downloader.RFailedEvent{})
+	defer events.Unsubscribe()
+
+	for {
+		select {
+		case ev := <-events.Chan():
+			if ev == nil {
+				return
+			}
+			switch ev.Data.(type) {
+			case downloader.RStartEvent:
+				// Todo(@Sourav) Handle sync to propose a new block
+				log.Info("@miner.go downloader.RStartEvent received!!")
+			case downloader.RDoneEvent, downloader.RFailedEvent:
+				// Todo(@Sourav) Handle sync to propose a new block
+				log.Info("@miner.go downloader.DoneEvent or FailedEvent received!!")
 				return
 			}
 		case <-self.exitCh:

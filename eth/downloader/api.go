@@ -71,6 +71,7 @@ func (api *PublicDownloaderAPI) eventLoop() {
 				return
 			}
 
+			// Todo(@Sourav) to create an interface to inform about current synchronization sattus
 			var notification interface{}
 			switch event.Data.(type) {
 			case StartEvent:

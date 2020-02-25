@@ -147,33 +147,40 @@ func (pm *ProtocolManager) syncer() {
 		case p := <-pm.newPeerCh:
 			peerShard := p.Shard()
 			// Make sure we have peers to select from, then sync
+			pm.cousinPeerLock.Lock()
 			if pm.cousinPeers[peerShard] == nil {
 				pm.cousinPeers[peerShard] = newPeerSet()
 			}
+			pm.cousinPeerLock.Unlock()
+			pm.cousinPeerLock.RLock()
 			if pm.cousinPeers[peerShard].Len() < minDesiredPeerCount {
+				pm.cousinPeerLock.RUnlock()
 				break
 			}
 			if !pm.raftMode {
-				if peerShard == pm.myshard {
-					go pm.synchronise(false, pm.cousinPeers[pm.myshard].BestPeer(false))
-					go pm.synchronise(true, pm.cousinPeers[pm.myshard].BestPeer(true))
+				// For simplicity shard nodes only sync with members of their shard
+				// An alternate approach would be to sync reference block with everyone
+				if pm.myshard == peerShard {
+					pm.synchronise(false, pm.cousinPeers[pm.myshard].BestPeer(false))
 				} else {
-					go pm.synchronise(true, pm.cousinPeers[peerShard].BestPeer(true))
+					if peerShard == uint64(0) {
+						pm.synchronise(true, pm.cousinPeers[peerShard].BestPeer(true))
+					}
 				}
 			}
+			pm.cousinPeerLock.RUnlock()
 
 		case <-forceSync.C:
 			if !pm.raftMode {
-
 				// Force a sync even if not enough peers are present
-				for shard, peers := range pm.cousinPeers {
-					if shard == pm.myshard && peers != nil {
-						go pm.synchronise(false, peers.BestPeer(false))
-						go pm.synchronise(true, peers.BestPeer(true))
-					} else {
-						go pm.synchronise(true, peers.BestPeer(true))
-					}
+				pm.cousinPeerLock.RLock()
+				if pm.cousinPeers[pm.myshard] != nil {
+					pm.synchronise(false, pm.cousinPeers[pm.myshard].BestPeer(false))
 				}
+				if pm.myshard > uint64(0) && pm.cousinPeers[uint64(0)] != nil {
+					pm.synchronise(true, pm.cousinPeers[uint64(0)].BestPeer(true))
+				}
+				pm.cousinPeerLock.RUnlock()
 			}
 
 		case <-pm.noMorePeers:
@@ -211,14 +218,19 @@ func (pm *ProtocolManager) synchronise(ref bool, peer *peer) {
 	if atomic.LoadUint32(&pm.fastSync) == 1 {
 		// Fast sync was explicitly requested, and explicitly granted
 		mode = downloader.FastSync
-	} else if currentBlock.NumberU64() == 0 && (pm.blockchain.CurrentFastBlock().NumberU64() > 0 || pm.refchain.CurrentFastBlock().NumberU64() > 0) {
+	} else if currentBlock.NumberU64() == 0 {
 		// The database seems empty as the current block is the genesis. Yet the fast
 		// block is ahead, so fast sync was enabled for this node at a certain point.
 		// The only scenario where this can happen is if the user manually (or via a
 		// bad block) rolled back a fast sync node below the sync point. In this case
 		// however it's safe to reenable fast sync.
-		atomic.StoreUint32(&pm.fastSync, 1)
-		mode = downloader.FastSync
+		if ref && pm.refchain.CurrentFastBlock().NumberU64() > 0 {
+			atomic.StoreUint32(&pm.fastSync, 1)
+			mode = downloader.FastSync
+		} else if pm.blockchain.CurrentFastBlock().NumberU64() > 0 {
+			atomic.StoreUint32(&pm.fastSync, 1)
+			mode = downloader.FastSync
+		}
 	}
 
 	if mode == downloader.FastSync {
@@ -235,6 +247,7 @@ func (pm *ProtocolManager) synchronise(ref bool, peer *peer) {
 		}
 	}
 
+	log.Info("@lock, pm.synchronise called with", "pShard", peer.Shard(), "pTd", pTd, "ref", ref)
 	// Run the sync cycle, and disable fast sync if we've went past the pivot block
 	if err := pm.downloader.Synchronise(ref, peer.id, pHead, pTd, mode); err != nil {
 		return

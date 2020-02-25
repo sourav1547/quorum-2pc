@@ -353,16 +353,16 @@ func (p *peer) SendReceiptsRLP(receipts []rlp.RawValue) error {
 
 // RequestOneHeader is a wrapper around the header query functions to fetch a
 // single header. It is used solely by the fetcher.
-func (p *peer) RequestOneHeader(hash common.Hash) error {
+func (p *peer) RequestOneHeader(shard uint64, hash common.Hash) error {
 	p.Log().Debug("Fetching single header", "hash", hash)
-	return p2p.Send(p.rw, GetBlockHeadersMsg, &getBlockHeadersData{Origin: hashOrNumber{Hash: hash}, Amount: uint64(1), Skip: uint64(0), Reverse: false})
+	return p2p.Send(p.rw, GetBlockHeadersMsg, &getBlockHeadersData{Origin: hashOrNumber{Hash: hash}, Amount: uint64(1), Skip: uint64(0), Reverse: false, Shard: shard})
 }
 
 // RequestHeadersByHash fetches a batch of blocks' headers corresponding to the
 // specified header query, based on the hash of an origin block.
-func (p *peer) RequestHeadersByHash(origin common.Hash, amount int, skip int, reverse bool) error {
+func (p *peer) RequestHeadersByHash(shard uint64, origin common.Hash, amount int, skip int, reverse bool) error {
 	p.Log().Debug("Fetching batch of headers", "count", amount, "fromhash", origin, "skip", skip, "reverse", reverse)
-	return p2p.Send(p.rw, GetBlockHeadersMsg, &getBlockHeadersData{Origin: hashOrNumber{Hash: origin}, Amount: uint64(amount), Skip: uint64(skip), Reverse: reverse})
+	return p2p.Send(p.rw, GetBlockHeadersMsg, &getBlockHeadersData{Origin: hashOrNumber{Hash: origin}, Amount: uint64(amount), Skip: uint64(skip), Reverse: reverse, Shard: shard})
 }
 
 // RequestHeadersByNumber fetches a batch of blocks' headers corresponding to the
@@ -374,9 +374,9 @@ func (p *peer) RequestHeadersByNumber(shard uint64, origin uint64, amount int, s
 
 // RequestBodies fetches a batch of blocks' bodies corresponding to the hashes
 // specified.
-func (p *peer) RequestBodies(hashes []common.Hash) error {
+func (p *peer) RequestBodies(shard uint64, hashes []common.Hash) error {
 	p.Log().Debug("Fetching batch of block bodies", "count", len(hashes))
-	return p2p.Send(p.rw, GetBlockBodiesMsg, hashes)
+	return p2p.Send(p.rw, GetBlockBodiesMsg, &getBlockBodiesData{Hashes: hashes, Shard: shard})
 }
 
 // RequestNodeData fetches a batch of arbitrary data from a node's known state
@@ -387,9 +387,9 @@ func (p *peer) RequestNodeData(hashes []common.Hash) error {
 }
 
 // RequestReceipts fetches a batch of transaction receipts from a remote node.
-func (p *peer) RequestReceipts(hashes []common.Hash) error {
+func (p *peer) RequestReceipts(shard uint64, hashes []common.Hash) error {
 	p.Log().Debug("Fetching batch of receipts", "count", len(hashes))
-	return p2p.Send(p.rw, GetReceiptsMsg, hashes)
+	return p2p.Send(p.rw, GetReceiptsMsg, getReceiptsData{Hashes: hashes, Shard: shard})
 }
 
 // Handshake executes the eth protocol handshake, negotiating version number,
@@ -426,7 +426,19 @@ func (p *peer) Handshake(shard, network uint64, td, rTd *big.Int, head, rHead co
 			return p2p.DiscReadTimeout
 		}
 	}
-	p.td, p.head, p.rTd, p.rHead = status.TD, status.CurrentBlock, status.RTD, status.RCurrentBlock
+
+	if shard == status.ShardId {
+		p.td, p.head = status.TD, status.CurrentBlock
+		if shard > uint64(0) {
+			p.rTd, p.rHead = status.RTD, status.RCurrentBlock
+		}
+	} else {
+		if status.ShardId == uint64(0) {
+			p.rTd, p.rHead = status.TD, status.CurrentBlock
+		} else {
+			p.rTd, p.rHead = status.RTD, status.RCurrentBlock
+		}
+	}
 	return nil
 }
 

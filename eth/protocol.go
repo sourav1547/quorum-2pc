@@ -138,6 +138,17 @@ type getBlockHeadersData struct {
 	Shard   uint64
 }
 
+// to get block with hashes
+type getBlockBodiesData struct {
+	Shard  uint64
+	Hashes []common.Hash
+}
+
+type getReceiptsData struct {
+	Shard  uint64
+	Hashes []common.Hash
+}
+
 // hashOrNumber is a combined field for specifying an origin block.
 type hashOrNumber struct {
 	Hash   common.Hash // Block hash from which to retrieve headers (excludes Number)

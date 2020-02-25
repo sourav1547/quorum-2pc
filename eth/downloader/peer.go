@@ -54,6 +54,11 @@ type peerConnection struct {
 	receiptIdle int32 // Current receipt activity state of the peer (idle = 0, active = 1)
 	stateIdle   int32 // Current node data activity state of the peer (idle = 0, active = 1)
 
+	rHeaderIdle  int32
+	rBlockIdle   int32
+	rReceiptIdle int32
+	rStateIdle   int32
+
 	headerThroughput  float64 // Number of headers measured to be retrievable per second
 	blockThroughput   float64 // Number of blocks (bodies) measured to be retrievable per second
 	receiptThroughput float64 // Number of receipts measured to be retrievable per second
@@ -78,7 +83,7 @@ type peerConnection struct {
 // LightPeer encapsulates the methods required to synchronise with a remote light peer.
 type LightPeer interface {
 	Head(bool) (common.Hash, *big.Int)
-	RequestHeadersByHash(common.Hash, int, int, bool) error
+	RequestHeadersByHash(uint64, common.Hash, int, int, bool) error
 	RequestHeadersByNumber(uint64, uint64, int, int, bool) error
 	Shard() uint64
 }
@@ -86,8 +91,8 @@ type LightPeer interface {
 // Peer encapsulates the methods required to synchronise with a remote full peer.
 type Peer interface {
 	LightPeer
-	RequestBodies([]common.Hash) error
-	RequestReceipts([]common.Hash) error
+	RequestBodies(uint64, []common.Hash) error
+	RequestReceipts(uint64, []common.Hash) error
 	RequestNodeData([]common.Hash) error
 }
 
@@ -97,8 +102,8 @@ type lightPeerWrapper struct {
 }
 
 func (w *lightPeerWrapper) Head(ref bool) (common.Hash, *big.Int) { return w.peer.Head(ref) }
-func (w *lightPeerWrapper) RequestHeadersByHash(h common.Hash, amount int, skip int, reverse bool) error {
-	return w.peer.RequestHeadersByHash(h, amount, skip, reverse)
+func (w *lightPeerWrapper) RequestHeadersByHash(shard uint64, h common.Hash, amount int, skip int, reverse bool) error {
+	return w.peer.RequestHeadersByHash(shard, h, amount, skip, reverse)
 }
 func (w *lightPeerWrapper) RequestHeadersByNumber(shard uint64, i uint64, amount int, skip int, reverse bool) error {
 	return w.peer.RequestHeadersByNumber(shard, i, amount, skip, reverse)
@@ -163,7 +168,7 @@ func (p *peerConnection) FetchHeaders(shard uint64, from uint64, count int) erro
 }
 
 // FetchBodies sends a block body retrieval request to the remote peer.
-func (p *peerConnection) FetchBodies(request *fetchRequest) error {
+func (p *peerConnection) FetchBodies(shard uint64, request *fetchRequest) error {
 	// Sanity check the protocol version
 	if p.version < 62 {
 		panic(fmt.Sprintf("body fetch [eth/62+] requested on eth/%d", p.version))
@@ -179,13 +184,13 @@ func (p *peerConnection) FetchBodies(request *fetchRequest) error {
 	for _, header := range request.Headers {
 		hashes = append(hashes, header.Hash())
 	}
-	go p.peer.RequestBodies(hashes)
+	go p.peer.RequestBodies(shard, hashes)
 
 	return nil
 }
 
 // FetchReceipts sends a receipt retrieval request to the remote peer.
-func (p *peerConnection) FetchReceipts(request *fetchRequest) error {
+func (p *peerConnection) FetchReceipts(shard uint64, request *fetchRequest) error {
 	// Sanity check the protocol version
 	if p.version < 63 {
 		panic(fmt.Sprintf("body fetch [eth/63+] requested on eth/%d", p.version))
@@ -201,7 +206,7 @@ func (p *peerConnection) FetchReceipts(request *fetchRequest) error {
 	for _, header := range request.Headers {
 		hashes = append(hashes, header.Hash())
 	}
-	go p.peer.RequestReceipts(hashes)
+	go p.peer.RequestReceipts(shard, hashes)
 
 	return nil
 }

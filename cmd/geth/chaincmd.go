@@ -386,6 +386,7 @@ func exportPreimages(ctx *cli.Context) error {
 }
 
 func copyDb(ctx *cli.Context) error {
+	fmt.Println("@chaincmd Called copyDb function")
 	// Ensure we have a source chain directory to copy
 	if len(ctx.Args()) != 1 {
 		utils.Fatalf("Source chaindata directory path argument missing")

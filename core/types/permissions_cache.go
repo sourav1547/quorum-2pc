@@ -4,6 +4,7 @@ import (
 	"math/big"
 	"sync"
 
+	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/p2p/enode"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -189,6 +190,7 @@ func (pc *PermissionConfig) IsEmpty() bool {
 
 // SetSyncStatus sets the current syncing status.
 func SetSyncStatus(ref bool) {
+	log.Info("@sd sync-status set", "ref", ref)
 	if ref {
 		rsyncStarted = true
 	} else {

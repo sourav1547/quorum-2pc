@@ -78,6 +78,7 @@ type ProtocolManager struct {
 	refAddress    common.Address
 
 	fastSync  uint32 // Flag whether fast sync is enabled (gets disabled if we already have blocks)
+	rFastSync uint32 // Flag whether reference chain fast sync enabled or not.
 	acceptTxs uint32 // Flag whether we're considered synchronised (enables transaction processing)
 
 	txpool      txPool
@@ -106,6 +107,7 @@ type ProtocolManager struct {
 	newPeerCh   chan *peer
 	txsyncCh    chan *txsync
 	quitSync    chan struct{}
+	rQuitSync   chan struct{}
 	noMorePeers chan struct{}
 
 	// wait group is used for graceful shutdowns during downloading
@@ -137,6 +139,7 @@ func NewProtocolManager(config *params.ChainConfig, mode downloader.SyncMode, nu
 		noMorePeers:   make(chan struct{}),
 		txsyncCh:      make(chan *txsync),
 		quitSync:      make(chan struct{}),
+		rQuitSync:     make(chan struct{}),
 		raftMode:      raftMode,
 		engine:        engine,
 	}
@@ -157,6 +160,7 @@ func NewProtocolManager(config *params.ChainConfig, mode downloader.SyncMode, nu
 	}
 	if mode == downloader.FastSync {
 		manager.fastSync = uint32(1)
+		manager.rFastSync = uint32(1)
 	}
 	protocol := engine.Protocol()
 	// Initiate a sub-protocol for every implemented version we can handle
@@ -218,15 +222,20 @@ func NewProtocolManager(config *params.ChainConfig, mode downloader.SyncMode, nu
 	}
 	inserter := func(ref bool, blocks types.Blocks) (int, error) {
 		// If fast sync is running, deny importing weird blocks
-		if atomic.LoadUint32(&manager.fastSync) == 1 {
-			log.Warn("Discarded bad propagated block", "number", blocks[0].Number(), "hash", blocks[0].Hash())
-			return 0, nil
-		}
-		atomic.StoreUint32(&manager.acceptTxs, 1) // Mark initial sync done on any fetcher import
 		if ref {
+			if atomic.LoadUint32(&manager.rFastSync) == 1 {
+				log.Warn("Discarded bad propagated reference block", "number", blocks[0].Number(), "hash", blocks[0].Hash())
+				return 0, nil
+			}
 			return manager.refchain.InsertChain(blocks)
+		} else {
+			if atomic.LoadUint32(&manager.fastSync) == 1 {
+				log.Warn("Discarded bad propagated block", "number", blocks[0].Number(), "hash", blocks[0].Hash())
+				return 0, nil
+			}
+			atomic.StoreUint32(&manager.acceptTxs, 1) // Mark initial sync done on any fetcher import
+			return manager.blockchain.InsertChain(blocks)
 		}
-		return manager.blockchain.InsertChain(blocks)
 	}
 	manager.fetcher = fetcher.New(blockchain.GetBlockByHash, refchain.GetBlockByHash, validator, manager.BroadcastBlock, heighter, inserter, manager.removePeer, manager.myshard)
 
@@ -461,6 +470,7 @@ func (pm *ProtocolManager) handleMsg(p *peer) error {
 			rfirst  bool
 		)
 
+		// To check whether the reference
 		ref := query.Shard == uint64(0) && pm.myshard > uint64(0)
 		if ref {
 			rfirst = true
@@ -589,6 +599,9 @@ func (pm *ProtocolManager) handleMsg(p *peer) error {
 		return p.SendBlockHeaders(headers)
 
 	case msg.Code == BlockHeadersMsg:
+		// @sourav, todo: first check whether the message is for
+		// reference chain or for mainchain. Add the block in
+		// appropriate position.
 		// A batch of headers arrived to one of our previous requests
 		var headers []*types.Header
 		if err := msg.Decode(&headers); err != nil {
@@ -641,6 +654,7 @@ func (pm *ProtocolManager) handleMsg(p *peer) error {
 			headers = pm.fetcher.FilterHeaders(p.id, headers, time.Now())
 		}
 		if len(headers) > 0 || !filter {
+			log.Info("@sd deliver headers called", "filter", filter, "len", len(headers))
 			err := pm.downloader.DeliverHeaders(p.id, headers)
 			if err != nil {
 				log.Debug("Failed to deliver headers", "err", err)
@@ -649,30 +663,28 @@ func (pm *ProtocolManager) handleMsg(p *peer) error {
 
 	case msg.Code == GetBlockBodiesMsg:
 		// Decode the retrieval message
-		msgStream := rlp.NewStream(msg.Payload, uint64(msg.Size))
-		if _, err := msgStream.List(); err != nil {
-			return err
+		var request getBlockBodiesData
+		if err := msg.Decode(&request); err != nil {
+			return errResp(ErrDecode, "msg %v: %v", msg, err)
 		}
+		shard := request.Shard
+		hashes := request.Hashes
 		// Gather blocks until the fetch or network limits is reached
 		var (
-			hash   common.Hash
 			bytes  int
 			bodies []rlp.RawValue
 		)
-		for bytes < softResponseLimit && len(bodies) < downloader.MaxBlockFetch {
-			// Retrieve the hash of the next block
-			if err := msgStream.Decode(&hash); err == rlp.EOL {
-				break
-			} else if err != nil {
-				return errResp(ErrDecode, "msg %v: %v", msg, err)
-			}
-			// Retrieve the requested block body, stopping if enough was found
-			if data := pm.blockchain.GetBodyRLP(hash); len(data) != 0 {
-				bodies = append(bodies, data)
-				bytes += len(data)
-			} else if data = pm.refchain.GetBodyRLP(hash); len(data) != 0 {
-				bodies = append(bodies, data)
-				bytes += len(data)
+		for _, hash := range hashes {
+			if shard == pm.myshard {
+				if data := pm.blockchain.GetBodyRLP(hash); len(data) != 0 {
+					bodies = append(bodies, data)
+					bytes += len(data)
+				}
+			} else {
+				if data := pm.refchain.GetBodyRLP(hash); len(data) != 0 {
+					bodies = append(bodies, data)
+					bytes += len(data)
+				}
 			}
 		}
 		return p.SendBlockBodiesRLP(bodies)
@@ -745,6 +757,14 @@ func (pm *ProtocolManager) handleMsg(p *peer) error {
 		}
 
 	case p.version >= eth63 && msg.Code == GetReceiptsMsg:
+		var request getReceiptsData
+		if err := msg.Decode(&request); err != nil {
+			return errResp(ErrDecode, "msg %v: %v", msg, err)
+		}
+
+		hashes := request.Hashes
+		shard := request.Shard
+
 		// Decode the retrieval message
 		msgStream := rlp.NewStream(msg.Payload, uint64(msg.Size))
 		if _, err := msgStream.List(); err != nil {
@@ -752,33 +772,28 @@ func (pm *ProtocolManager) handleMsg(p *peer) error {
 		}
 		// Gather state data until the fetch or network limits is reached
 		var (
-			hash     common.Hash
 			bytes    int
 			receipts []rlp.RawValue
+			results  types.Receipts
 		)
-		for bytes < softResponseLimit && len(receipts) < downloader.MaxReceiptFetch {
-			// Retrieve the hash of the next block
-			if err := msgStream.Decode(&hash); err == rlp.EOL {
-				break
-			} else if err != nil {
-				return errResp(ErrDecode, "msg %v: %v", msg, err)
-			}
-			// Retrieve the requested block's receipts, skipping if unknown to us
-			results := pm.blockchain.GetReceiptsByHash(hash)
-			rResults := pm.refchain.GetReceiptsByHash(hash)
-			if results == nil {
-				if header := pm.blockchain.GetHeaderByHash(hash); header == nil || header.ReceiptHash != types.EmptyRootHash {
-					if rHeader := pm.refchain.GetHeaderByHash(hash); rHeader == nil ||
-						rHeader.ReceiptHash != types.EmptyRootHash {
+
+		for _, hash := range hashes {
+			if shard == pm.myshard {
+				results = pm.blockchain.GetReceiptsByHash(hash)
+				if results == nil {
+					if header := pm.blockchain.GetHeaderByHash(hash); header == nil || header.ReceiptHash != types.EmptyRootHash {
+						continue
+					}
+				}
+			} else {
+				results = pm.refchain.GetReceiptsByHash(hash)
+				if results == nil {
+					if header := pm.refchain.GetHeaderByHash(hash); header == nil || header.ReceiptHash != types.EmptyRootHash {
 						continue
 					}
 				}
 			}
-
-			// If known, encode and queue for response packet
 			if encoded, err := rlp.EncodeToBytes(results); err != nil {
-				log.Error("Failed to encode receipt", "err", err)
-			} else if encoded, err = rlp.EncodeToBytes(rResults); err != nil {
 				log.Error("Failed to encode receipt", "err", err)
 			} else {
 				receipts = append(receipts, encoded)
@@ -848,7 +863,7 @@ func (pm *ProtocolManager) handleMsg(p *peer) error {
 			if ref {
 				currentBlock := pm.refchain.CurrentBlock()
 				log.Info("@hnd, refchain", "bn", currentBlock.NumberU64())
-				if trueTD.Cmp(pm.refchain.GetTd(currentBlock.Hash(), currentBlock.NumberU64())) > 0 {
+				if trueTD.Cmp(pm.refchain.GetTd(currentBlock.Hash(), currentBlock.NumberU64())) > 0 && p.Shard() == uint64(0) {
 					go pm.synchronise(ref, p)
 				}
 			} else {
@@ -893,29 +908,90 @@ func (pm *ProtocolManager) Enqueue(id string, block *types.Block) {
 func (pm *ProtocolManager) BroadcastBlock(block *types.Block, propagate bool) {
 	hash := block.Hash()
 
-	ref := (pm.myshard > 0 && block.Shard() == 0)
 	// If propagation is requested, send to a subset of the peer
 	if propagate {
 		// Calculate the TD of the block (it's not imported yet, so block.Td is not valid)
-		var td *big.Int
-		if parent := pm.blockchain.GetBlock(block.ParentHash(), block.NumberU64()-1); parent != nil {
-			td = new(big.Int).Add(block.Difficulty(), pm.blockchain.GetTd(block.ParentHash(), block.NumberU64()-1))
-		} else {
-			log.Error("Propagating dangling block", "number", block.Number(), "hash", hash)
-			return
-		}
+		var (
+			td     *big.Int
+			parent *types.Block
+		)
 
 		// If the node belongs to a reference shard, broadcast its
 		// block to a subset of all the shards. Otherwise, broadcast
 		// to only your own shards.
 		if pm.myshard == 0 {
-			pm.cousinPeerLock.RLock()
-			numConnectedShard := uint64(len(pm.cousinPeers))
-			pm.cousinPeerLock.RUnlock()
+			if parent = pm.blockchain.GetBlock(block.ParentHash(), block.NumberU64()-1); parent != nil {
+				td = new(big.Int).Add(block.Difficulty(), pm.blockchain.GetTd(block.ParentHash(), block.NumberU64()-1))
+			} else {
+				log.Error("Propagating dangling block", "number", block.Number(), "hash", hash)
+				return
+			}
 
-			for i := uint64(0); i < numConnectedShard; i++ {
-				pm.cousinPeerLock.RLock()
+			pm.cousinPeerLock.RLock()
+			for i := range pm.cousinPeers {
 				peers := pm.cousinPeers[i].PeersWithoutBlock(hash)
+				// Send the block to a subset of our peers
+				transferLen := int(math.Sqrt(float64(len(peers))))
+				if transferLen < minBroadcastPeers {
+					transferLen = minBroadcastPeers
+				}
+				if transferLen > len(peers) {
+					transferLen = len(peers)
+				}
+				transfer := peers[:transferLen]
+				for _, peer := range transfer {
+					if i == pm.myshard {
+						peer.AsyncSendNewBlock(false, block, td)
+					} else {
+						peer.AsyncSendNewBlock(true, block, td)
+					}
+				}
+				log.Trace("Propagated block", "hash", hash, "recipients", len(transfer), "duration", common.PrettyDuration(time.Since(block.ReceivedAt)))
+			}
+			pm.cousinPeerLock.RUnlock()
+		} else {
+
+			ref := block.Shard() == uint64(0)
+			if ref {
+
+				if parent = pm.refchain.GetBlock(block.ParentHash(), block.NumberU64()-1); parent != nil {
+					td = new(big.Int).Add(block.Difficulty(), pm.refchain.GetTd(block.ParentHash(), block.NumberU64()-1))
+				} else {
+					log.Error("Propagating dangling block", "number", block.Number(), "hash", hash)
+					return
+				}
+
+				pm.cousinPeerLock.RLock()
+				for i := range pm.cousinPeers {
+					peers := pm.cousinPeers[i].PeersWithoutBlock(hash)
+					// Send the block to a subset of our peers
+					transferLen := int(math.Sqrt(float64(len(peers))))
+					if transferLen < minBroadcastPeers {
+						transferLen = minBroadcastPeers
+					}
+					if transferLen > len(peers) {
+						transferLen = len(peers)
+					}
+					transfer := peers[:transferLen]
+					for _, peer := range transfer {
+						if i != uint64(0) {
+							peer.AsyncSendNewBlock(true, block, td)
+						}
+					}
+					log.Trace("Propagated block", "hash", hash, "recipients", len(transfer), "duration", common.PrettyDuration(time.Since(block.ReceivedAt)))
+				}
+				pm.cousinPeerLock.RUnlock()
+			} else {
+
+				if parent = pm.blockchain.GetBlock(block.ParentHash(), block.NumberU64()-1); parent != nil {
+					td = new(big.Int).Add(block.Difficulty(), pm.blockchain.GetTd(block.ParentHash(), block.NumberU64()-1))
+				} else {
+					log.Error("Propagating dangling block", "number", block.Number(), "hash", hash)
+					return
+				}
+
+				pm.cousinPeerLock.RLock()
+				peers := pm.cousinPeers[pm.myshard].PeersWithoutBlock(hash)
 				pm.cousinPeerLock.RUnlock()
 				// Send the block to a subset of our peers
 				transferLen := int(math.Sqrt(float64(len(peers))))
@@ -927,29 +1003,10 @@ func (pm *ProtocolManager) BroadcastBlock(block *types.Block, propagate bool) {
 				}
 				transfer := peers[:transferLen]
 				for _, peer := range transfer {
-					peer.AsyncSendNewBlock(ref, block, td)
+					peer.AsyncSendNewBlock(false, block, td)
 				}
 				log.Trace("Propagated block", "hash", hash, "recipients", len(transfer), "duration", common.PrettyDuration(time.Since(block.ReceivedAt)))
 			}
-		} else {
-
-			pm.cousinPeerLock.RLock()
-			peers := pm.cousinPeers[pm.myshard].PeersWithoutBlock(hash)
-			pm.cousinPeerLock.RUnlock()
-			// Send the block to a subset of our peers
-			transferLen := int(math.Sqrt(float64(len(peers))))
-			if transferLen < minBroadcastPeers {
-				transferLen = minBroadcastPeers
-			}
-			if transferLen > len(peers) {
-				transferLen = len(peers)
-			}
-			transfer := peers[:transferLen]
-			ref := block.Shard() == uint64(0)
-			for _, peer := range transfer {
-				peer.AsyncSendNewBlock(ref, block, td)
-			}
-			log.Trace("Propagated block", "hash", hash, "recipients", len(transfer), "duration", common.PrettyDuration(time.Since(block.ReceivedAt)))
 
 			stateTx := types.NewTransaction(types.StateCommit, block.NumberU64()-1, uint64(0), pm.refAddress, pm.shardAddMap[pm.myshard], pm.stateGasLimit, pm.stateGasPrice, block.Hash().Bytes())
 			var txs []*types.Transaction
@@ -970,7 +1027,7 @@ func (pm *ProtocolManager) BroadcastBlock(block *types.Block, propagate bool) {
 			for _, peer := range rTransfer {
 				peer.AsyncSendTransactions(txs)
 			}
-			log.Trace("Propagated state committment", "number", block.Number(), "hash", stateTx.Hash())
+			log.Info("Propagated state committment", "number", block.Number(), "hash", stateTx.Hash())
 		}
 		return
 	}
@@ -979,23 +1036,33 @@ func (pm *ProtocolManager) BroadcastBlock(block *types.Block, propagate bool) {
 		receipients := 0
 		if pm.myshard == 0 {
 			pm.cousinPeerLock.RLock()
-			numConnectedShard := uint64(len(pm.cousinPeers))
-			pm.cousinPeerLock.RUnlock()
-			for i := uint64(0); i < numConnectedShard; i++ {
-				pm.cousinPeerLock.RLock()
+			for i := range pm.cousinPeers {
 				peers := pm.cousinPeers[i].PeersWithoutBlock(hash)
-				pm.cousinPeerLock.RUnlock()
-				for _, peer := range peers {
-					peer.AsyncSendNewBlockHash(ref, block)
-					receipients++
+				// Send the block to a subset of our peers
+				transferLen := int(math.Sqrt(float64(len(peers))))
+				if transferLen < minBroadcastPeers {
+					transferLen = minBroadcastPeers
 				}
+				if transferLen > len(peers) {
+					transferLen = len(peers)
+				}
+				transfer := peers[:transferLen]
+				for _, peer := range transfer {
+					if i == pm.myshard {
+						peer.AsyncSendNewBlockHash(false, block)
+					} else {
+						peer.AsyncSendNewBlockHash(true, block)
+					}
+				}
+				log.Trace("Propagated block", "hash", hash, "recipients", len(transfer), "duration", common.PrettyDuration(time.Since(block.ReceivedAt)))
 			}
+			pm.cousinPeerLock.RUnlock()
 		} else {
 			pm.cousinPeerLock.RLock()
 			peers := pm.cousinPeers[pm.myshard].PeersWithoutBlock(hash)
 			pm.cousinPeerLock.RUnlock()
 			for _, peer := range peers {
-				peer.AsyncSendNewBlockHash(ref, block)
+				peer.AsyncSendNewBlockHash(false, block)
 				receipients++
 			}
 		}

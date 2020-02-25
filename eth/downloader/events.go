@@ -16,6 +16,12 @@
 
 package downloader
 
+// Events for Shard chain synchronization
 type DoneEvent struct{}
 type StartEvent struct{}
 type FailedEvent struct{ Err error }
+
+// Events for Reference chain synchronization
+type RDoneEvent struct{}
+type RStartEvent struct{}
+type RFailedEvent struct{ Err error }
