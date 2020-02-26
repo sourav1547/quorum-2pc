@@ -229,7 +229,7 @@ func (p *PermissionCtrl) asyncStart() {
 		for {
 			select {
 			case <-pollingTicker.C:
-				if types.GetSyncStatus(false) && !ethereum.Downloader().Synchronising(false) {
+				if types.GetSyncStatus(false) && !ethereum.Downloader().Synchronising() {
 					return
 				}
 			case <-stopChan:

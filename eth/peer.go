@@ -139,11 +139,10 @@ func (p *peer) broadcast(localShard uint64) {
 			p.Log().Trace("Propagated block", "number", prop.block.Number(), "hash", prop.block.Hash(), "td", prop.td)
 
 		case block := <-p.queuedAnns:
-			ref := (block.Shard() == uint64(0) && localShard > uint64(0))
+			ref := block.Shard() == uint64(0) && p.Shard() > uint64(0)
 			if err := p.SendNewBlockHashes(ref, []common.Hash{block.Hash()}, []uint64{block.NumberU64()}); err != nil {
 				return
 			}
-			p.Log().Trace("Announced block", "number", block.Number(), "hash", block.Hash())
 
 		case <-p.term:
 			return

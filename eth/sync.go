@@ -137,6 +137,7 @@ func (pm *ProtocolManager) syncer() {
 	pm.fetcher.Start()
 	defer pm.fetcher.Stop()
 	defer pm.downloader.Terminate()
+	defer pm.rDownloader.Terminate()
 
 	// Wait for different events to fire synchronisation operations
 	forceSync := time.NewTicker(forceSyncCycle)
@@ -157,6 +158,7 @@ func (pm *ProtocolManager) syncer() {
 				pm.cousinPeerLock.RUnlock()
 				break
 			}
+			pm.cousinPeerLock.RUnlock()
 			if !pm.raftMode {
 				// For simplicity shard nodes only sync with members of their shard
 				// An alternate approach would be to sync reference block with everyone
@@ -168,19 +170,17 @@ func (pm *ProtocolManager) syncer() {
 					}
 				}
 			}
-			pm.cousinPeerLock.RUnlock()
-
 		case <-forceSync.C:
 			if !pm.raftMode {
 				// Force a sync even if not enough peers are present
-				pm.cousinPeerLock.RLock()
+				// pm.cousinPeerLock.RLock()
 				if pm.cousinPeers[pm.myshard] != nil {
 					pm.synchronise(false, pm.cousinPeers[pm.myshard].BestPeer(false))
 				}
 				if pm.myshard > uint64(0) && pm.cousinPeers[uint64(0)] != nil {
 					pm.synchronise(true, pm.cousinPeers[uint64(0)].BestPeer(true))
 				}
-				pm.cousinPeerLock.RUnlock()
+				// pm.cousinPeerLock.RUnlock()
 			}
 
 		case <-pm.noMorePeers:
@@ -215,6 +215,9 @@ func (pm *ProtocolManager) synchronise(ref bool, peer *peer) {
 	}
 	// Otherwise try to sync with the downloader
 	mode := downloader.FullSync
+
+	/**
+	// Todo(@Sourav) Disabling fast sync for correctness.
 	if atomic.LoadUint32(&pm.fastSync) == 1 {
 		// Fast sync was explicitly requested, and explicitly granted
 		mode = downloader.FastSync
@@ -232,6 +235,7 @@ func (pm *ProtocolManager) synchronise(ref bool, peer *peer) {
 			mode = downloader.FastSync
 		}
 	}
+	**/
 
 	if mode == downloader.FastSync {
 		if ref {
@@ -247,11 +251,17 @@ func (pm *ProtocolManager) synchronise(ref bool, peer *peer) {
 		}
 	}
 
-	log.Info("@lock, pm.synchronise called with", "pShard", peer.Shard(), "pTd", pTd, "ref", ref)
 	// Run the sync cycle, and disable fast sync if we've went past the pivot block
-	if err := pm.downloader.Synchronise(ref, peer.id, pHead, pTd, mode); err != nil {
-		return
+	if ref {
+		if err := pm.rDownloader.Synchronise(peer.id, pHead, pTd, mode); err != nil {
+			return
+		}
+	} else {
+		if err := pm.downloader.Synchronise(peer.id, pHead, pTd, mode); err != nil {
+			return
+		}
 	}
+
 	if atomic.LoadUint32(&pm.fastSync) == 1 {
 		log.Info("Fast sync complete, auto disabling")
 		atomic.StoreUint32(&pm.fastSync, 0)

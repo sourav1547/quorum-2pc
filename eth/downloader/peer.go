@@ -54,6 +54,7 @@ type peerConnection struct {
 	receiptIdle int32 // Current receipt activity state of the peer (idle = 0, active = 1)
 	stateIdle   int32 // Current node data activity state of the peer (idle = 0, active = 1)
 
+	// For reference chain
 	rHeaderIdle  int32
 	rBlockIdle   int32
 	rReceiptIdle int32
@@ -64,6 +65,12 @@ type peerConnection struct {
 	receiptThroughput float64 // Number of receipts measured to be retrievable per second
 	stateThroughput   float64 // Number of node data pieces measured to be retrievable per second
 
+	// For reference chain
+	rHeaderThroughput  float64 // Number of headers measured to be retrievable per second
+	rBlockThroughput   float64 // Number of blocks (bodies) measured to be retrievable per second
+	rReceiptThroughput float64 // Number of receipts measured to be retrievable per second
+	rStateThroughput   float64 // Number of node data pieces measured to be retrievable per second
+
 	rtt time.Duration // Request round trip time to track responsiveness (QoS)
 
 	headerStarted  time.Time // Time instance when the last header fetch was started
@@ -71,7 +78,14 @@ type peerConnection struct {
 	receiptStarted time.Time // Time instance when the last receipt fetch was started
 	stateStarted   time.Time // Time instance when the last node data fetch was started
 
-	lacking map[common.Hash]struct{} // Set of hashes not to request (didn't have previously)
+	// For reference chain
+	rHeaderStarted  time.Time // Time instance when the last header fetch was started
+	rBlockStarted   time.Time // Time instance when the last block (body) fetch was started
+	rReceiptStarted time.Time // Time instance when the last receipt fetch was started
+	rStateStarted   time.Time // Time instance when the last node data fetch was started
+
+	lacking  map[common.Hash]struct{} // Set of hashes not to request (didn't have previously)
+	rLacking map[common.Hash]struct{} // Set of hashes not to request in the reference chain
 
 	peer Peer
 
@@ -132,21 +146,35 @@ func newPeerConnection(id string, version int, peer Peer, logger log.Logger) *pe
 }
 
 // Reset clears the internal state of a peer entity.
-func (p *peerConnection) Reset() {
+func (p *peerConnection) Reset(ref bool) {
 	p.lock.Lock()
 	defer p.lock.Unlock()
 
-	atomic.StoreInt32(&p.headerIdle, 0)
-	atomic.StoreInt32(&p.blockIdle, 0)
-	atomic.StoreInt32(&p.receiptIdle, 0)
-	atomic.StoreInt32(&p.stateIdle, 0)
+	if ref {
+		atomic.StoreInt32(&p.rHeaderIdle, 0)
+		atomic.StoreInt32(&p.rBlockIdle, 0)
+		atomic.StoreInt32(&p.rReceiptIdle, 0)
+		atomic.StoreInt32(&p.rStateIdle, 0)
 
-	p.headerThroughput = 0
-	p.blockThroughput = 0
-	p.receiptThroughput = 0
-	p.stateThroughput = 0
+		p.rHeaderThroughput = 0
+		p.rBlockThroughput = 0
+		p.rReceiptThroughput = 0
+		p.rStateThroughput = 0
 
-	p.lacking = make(map[common.Hash]struct{})
+		p.rLacking = make(map[common.Hash]struct{})
+	} else {
+		atomic.StoreInt32(&p.headerIdle, 0)
+		atomic.StoreInt32(&p.blockIdle, 0)
+		atomic.StoreInt32(&p.receiptIdle, 0)
+		atomic.StoreInt32(&p.stateIdle, 0)
+
+		p.headerThroughput = 0
+		p.blockThroughput = 0
+		p.receiptThroughput = 0
+		p.stateThroughput = 0
+
+		p.lacking = make(map[common.Hash]struct{})
+	}
 }
 
 // FetchHeaders sends a header retrieval request to the remote peer.
@@ -392,12 +420,12 @@ func (ps *peerSet) SubscribePeerDrops(ch chan<- *peerConnection) event.Subscript
 
 // Reset iterates over the current peer set, and resets each of the known peers
 // to prepare for a next batch of block retrieval.
-func (ps *peerSet) Reset() {
+func (ps *peerSet) Reset(ref bool) {
 	ps.lock.RLock()
 	defer ps.lock.RUnlock()
 
 	for _, peer := range ps.peers {
-		peer.Reset()
+		peer.Reset(ref)
 	}
 }
 

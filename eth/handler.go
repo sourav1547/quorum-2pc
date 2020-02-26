@@ -88,6 +88,7 @@ type ProtocolManager struct {
 	maxPeers    int
 
 	downloader      *downloader.Downloader
+	rDownloader     *downloader.Downloader
 	fetcher         *fetcher.Fetcher
 	cousinPeers     map[uint64]*peerSet
 	cousinPeerLock  sync.RWMutex
@@ -120,7 +121,7 @@ type ProtocolManager struct {
 
 // NewProtocolManager returns a new Ethereum sub protocol manager. The Ethereum sub protocol manages peers capable
 // with the Ethereum network.
-func NewProtocolManager(config *params.ChainConfig, mode downloader.SyncMode, numShard, myshard, networkID uint64, mux *event.TypeMux, txpool txPool, engine consensus.Engine, blockchain, refchain *core.BlockChain, refAddress common.Address, shardAddMap map[uint64]*big.Int, chaindb, refdb ethdb.Database, raftMode bool) (*ProtocolManager, error) {
+func NewProtocolManager(config *params.ChainConfig, mode downloader.SyncMode, numShard, myshard, networkID uint64, mux, rmux *event.TypeMux, txpool txPool, engine consensus.Engine, blockchain, refchain *core.BlockChain, refAddress common.Address, shardAddMap map[uint64]*big.Int, chaindb, refdb ethdb.Database, raftMode bool) (*ProtocolManager, error) {
 	// Create the protocol manager with the base fields
 	manager := &ProtocolManager{
 		numShard:      numShard,
@@ -129,6 +130,7 @@ func NewProtocolManager(config *params.ChainConfig, mode downloader.SyncMode, nu
 		stateGasPrice: big.NewInt(0),
 		networkID:     networkID,
 		eventMux:      mux,
+		rEventMux:     rmux,
 		txpool:        txpool,
 		blockchain:    blockchain,
 		refchain:      refchain,
@@ -206,7 +208,8 @@ func NewProtocolManager(config *params.ChainConfig, mode downloader.SyncMode, nu
 		return nil, errIncompatibleConfig
 	}
 	// Construct the different synchronisation mechanisms
-	manager.downloader = downloader.New(mode, chaindb, refdb, manager.eventMux, blockchain, refchain, nil, manager.removePeer, myshard)
+	manager.downloader = downloader.New(false, mode, chaindb, manager.eventMux, blockchain, nil, manager.removePeer, myshard)
+	manager.rDownloader = downloader.New(true, mode, refdb, manager.rEventMux, refchain, nil, manager.removePeer, myshard)
 
 	validator := func(ref bool, header *types.Header) error {
 		if ref {
@@ -256,6 +259,8 @@ func (pm *ProtocolManager) removePeer(id string) {
 
 	// Unregister the peer from the downloader and Ethereum peer set
 	pm.downloader.UnregisterPeer(id)
+	pm.rDownloader.UnregisterPeer(id)
+	// Todo rdwd
 	pm.cousinPeerLock.Lock()
 	if err := pm.cousinPeers[pm.myshard].Unregister(id); err != nil {
 		log.Error("Peer removal failed", "peer", id, "err", err)
@@ -376,6 +381,9 @@ func (pm *ProtocolManager) handle(p *peer) error {
 
 	// Register the peer in the downloader. If the downloader considers it banned, we disconnect
 	if err := pm.downloader.RegisterPeer(p.id, p.version, p); err != nil {
+		return err
+	}
+	if err := pm.rDownloader.RegisterPeer(p.id, p.version, p); err != nil {
 		return err
 	}
 	// Propagate existing transactions. new transactions appearing
@@ -572,7 +580,7 @@ func (pm *ProtocolManager) handleMsg(p *peer) error {
 					} else {
 						if header := pm.blockchain.GetHeaderByNumber(next); header != nil {
 							nextHash := header.Hash()
-							expOldHash, _ := pm.refchain.GetAncestor(nextHash, next, query.Skip+1, &maxNonCanonical)
+							expOldHash, _ := pm.blockchain.GetAncestor(nextHash, next, query.Skip+1, &maxNonCanonical)
 							if expOldHash == query.Origin.Hash {
 								query.Origin.Hash, query.Origin.Number = nextHash, next
 							} else {
@@ -635,7 +643,10 @@ func (pm *ProtocolManager) handleMsg(p *peer) error {
 		}
 		// Filter out any explicitly requested headers, deliver the rest to the downloader
 		filter := len(headers) == 1
+		var bshard uint64
+
 		if filter {
+			bshard = (headers[0]).Shard
 			// If it's a potential DAO fork check, validate against the rules
 			if p.forkDrop != nil && pm.chainconfig.DAOForkBlock.Cmp(headers[0].Number) == 0 {
 				// Disable the fork drop timer
@@ -654,10 +665,20 @@ func (pm *ProtocolManager) handleMsg(p *peer) error {
 			headers = pm.fetcher.FilterHeaders(p.id, headers, time.Now())
 		}
 		if len(headers) > 0 || !filter {
-			log.Info("@sd deliver headers called", "filter", filter, "len", len(headers))
-			err := pm.downloader.DeliverHeaders(p.id, headers)
-			if err != nil {
-				log.Debug("Failed to deliver headers", "err", err)
+			if len(headers) > 0 {
+				bshard = (headers[0]).Shard
+			}
+			ref := pm.myshard > uint64(0) && bshard == uint64(0)
+			if ref {
+				err := pm.rDownloader.DeliverHeaders(p.id, headers)
+				if err != nil {
+					log.Debug("Failed to deliver headers", "err", err)
+				}
+			} else {
+				err := pm.downloader.DeliverHeaders(p.id, headers)
+				if err != nil {
+					log.Debug("Failed to deliver headers", "err", err)
+				}
 			}
 		}
 
@@ -674,14 +695,15 @@ func (pm *ProtocolManager) handleMsg(p *peer) error {
 			bytes  int
 			bodies []rlp.RawValue
 		)
+		ref := shard == uint64(0) && pm.myshard > uint64(0)
 		for _, hash := range hashes {
-			if shard == pm.myshard {
-				if data := pm.blockchain.GetBodyRLP(hash); len(data) != 0 {
+			if ref {
+				if data := pm.refchain.GetBodyRLP(hash); len(data) != 0 {
 					bodies = append(bodies, data)
 					bytes += len(data)
 				}
 			} else {
-				if data := pm.refchain.GetBodyRLP(hash); len(data) != 0 {
+				if data := pm.blockchain.GetBodyRLP(hash); len(data) != 0 {
 					bodies = append(bodies, data)
 					bytes += len(data)
 				}
@@ -709,7 +731,13 @@ func (pm *ProtocolManager) handleMsg(p *peer) error {
 			transactions, uncles = pm.fetcher.FilterBodies(p.id, transactions, uncles, time.Now())
 		}
 		if len(transactions) > 0 || len(uncles) > 0 || !filter {
-			err := pm.downloader.DeliverBodies(p.id, transactions, uncles)
+
+			err := pm.rDownloader.DeliverBodies(p.id, transactions, uncles)
+			if err != nil {
+				log.Debug("Failed to deliver bodies", "err", err)
+			}
+
+			err = pm.downloader.DeliverBodies(p.id, transactions, uncles)
 			if err != nil {
 				log.Debug("Failed to deliver bodies", "err", err)
 			}
@@ -756,6 +784,11 @@ func (pm *ProtocolManager) handleMsg(p *peer) error {
 			log.Debug("Failed to deliver node state data", "err", err)
 		}
 
+		// Deliver all to the downloader
+		if err := pm.rDownloader.DeliverNodeData(p.id, data); err != nil {
+			log.Debug("Failed to deliver reference node state data", "err", err)
+		}
+
 	case p.version >= eth63 && msg.Code == GetReceiptsMsg:
 		var request getReceiptsData
 		if err := msg.Decode(&request); err != nil {
@@ -777,22 +810,24 @@ func (pm *ProtocolManager) handleMsg(p *peer) error {
 			results  types.Receipts
 		)
 
+		ref := shard == uint64(0) && pm.myshard > uint64(0)
 		for _, hash := range hashes {
-			if shard == pm.myshard {
-				results = pm.blockchain.GetReceiptsByHash(hash)
-				if results == nil {
-					if header := pm.blockchain.GetHeaderByHash(hash); header == nil || header.ReceiptHash != types.EmptyRootHash {
-						continue
-					}
-				}
-			} else {
+			if ref {
 				results = pm.refchain.GetReceiptsByHash(hash)
 				if results == nil {
 					if header := pm.refchain.GetHeaderByHash(hash); header == nil || header.ReceiptHash != types.EmptyRootHash {
 						continue
 					}
 				}
+			} else {
+				results = pm.blockchain.GetReceiptsByHash(hash)
+				if results == nil {
+					if header := pm.blockchain.GetHeaderByHash(hash); header == nil || header.ReceiptHash != types.EmptyRootHash {
+						continue
+					}
+				}
 			}
+
 			if encoded, err := rlp.EncodeToBytes(results); err != nil {
 				log.Error("Failed to encode receipt", "err", err)
 			} else {
@@ -813,6 +848,11 @@ func (pm *ProtocolManager) handleMsg(p *peer) error {
 			log.Debug("Failed to deliver receipts", "err", err)
 		}
 
+		// Deliver all to the downloader
+		if err = pm.rDownloader.DeliverReceipts(p.id, receipts); err != nil {
+			log.Debug("Failed to deliver receipts", "err", err)
+		}
+
 	case msg.Code == NewBlockHashesMsg:
 		var announces newBlockHashesData
 		if err := msg.Decode(&announces); err != nil {
@@ -825,8 +865,14 @@ func (pm *ProtocolManager) handleMsg(p *peer) error {
 		// Schedule all the unknown hashes for retrieval
 		unknown := make(newBlockHashesData, 0, len(announces))
 		for _, block := range announces {
-			if !pm.blockchain.HasBlock(block.Hash, block.Number) || !pm.refchain.HasBlock(block.Hash, block.Number) {
-				unknown = append(unknown, block)
+			if block.Ref {
+				if !pm.refchain.HasBlock(block.Hash, block.Number) {
+					unknown = append(unknown, block)
+				}
+			} else {
+				if !pm.blockchain.HasBlock(block.Hash, block.Number) {
+					unknown = append(unknown, block)
+				}
 			}
 		}
 		for _, block := range unknown {
@@ -862,7 +908,6 @@ func (pm *ProtocolManager) handleMsg(p *peer) error {
 			// scenario should easily be covered by the fetcher.
 			if ref {
 				currentBlock := pm.refchain.CurrentBlock()
-				log.Info("@hnd, refchain", "bn", currentBlock.NumberU64())
 				if trueTD.Cmp(pm.refchain.GetTd(currentBlock.Hash(), currentBlock.NumberU64())) > 0 && p.Shard() == uint64(0) {
 					go pm.synchronise(ref, p)
 				}
@@ -919,7 +964,7 @@ func (pm *ProtocolManager) BroadcastBlock(block *types.Block, propagate bool) {
 		// If the node belongs to a reference shard, broadcast its
 		// block to a subset of all the shards. Otherwise, broadcast
 		// to only your own shards.
-		if pm.myshard == 0 {
+		if pm.myshard == uint64(0) {
 			if parent = pm.blockchain.GetBlock(block.ParentHash(), block.NumberU64()-1); parent != nil {
 				td = new(big.Int).Add(block.Difficulty(), pm.blockchain.GetTd(block.ParentHash(), block.NumberU64()-1))
 			} else {
@@ -1170,14 +1215,11 @@ func (pm *ProtocolManager) getConsensusAlgorithm() string {
 // FindPeers returns
 func (pm *ProtocolManager) FindPeers(targets map[common.Address]bool) map[common.Address]consensus.Peer {
 	m := make(map[common.Address]consensus.Peer)
-	pm.cousinPeerLock.RLock()
-	if pm.cousinPeers[pm.myshard] == nil {
-		pm.cousinPeerLock.RUnlock()
-		return m
-	}
-	pm.cousinPeerLock.RUnlock()
 	pm.cousinPeerLock.Lock()
 	defer pm.cousinPeerLock.Unlock()
+	if pm.cousinPeers[pm.myshard] == nil {
+		return m
+	}
 	for _, p := range pm.cousinPeers[pm.myshard].Peers() {
 		pubKey := p.Node().Pubkey()
 		addr := crypto.PubkeyToAddress(*pubKey)

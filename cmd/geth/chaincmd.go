@@ -396,7 +396,7 @@ func copyDb(ctx *cli.Context) error {
 	chain, chainDb := utils.MakeChain(ctx, stack)
 
 	syncmode := *utils.GlobalTextMarshaler(ctx, utils.SyncModeFlag.Name).(*downloader.SyncMode)
-	dl := downloader.New(syncmode, chainDb, nil, new(event.TypeMux), chain, nil, nil, nil, uint64(0))
+	dl := downloader.New(false, syncmode, chainDb, new(event.TypeMux), chain, nil, nil, uint64(0))
 
 	// Create a source peer to satisfy downloader requests from
 	db, err := ethdb.NewLDBDatabase(ctx.Args().First(), ctx.GlobalInt(utils.CacheFlag.Name), 256)
@@ -418,10 +418,10 @@ func copyDb(ctx *cli.Context) error {
 	start := time.Now()
 
 	currentHeader := hc.CurrentHeader()
-	if err = dl.Synchronise(false, "local", currentHeader.Hash(), hc.GetTd(currentHeader.Hash(), currentHeader.Number.Uint64()), syncmode); err != nil {
+	if err = dl.Synchronise("local", currentHeader.Hash(), hc.GetTd(currentHeader.Hash(), currentHeader.Number.Uint64()), syncmode); err != nil {
 		return err
 	}
-	for dl.Synchronising(false) {
+	for dl.Synchronising() {
 		time.Sleep(10 * time.Millisecond)
 	}
 	fmt.Printf("Database copy done in %v\n", time.Since(start))

@@ -84,6 +84,7 @@ type Ethereum struct {
 	refDb   ethdb.Database // Reference chain database
 
 	eventMux       *event.TypeMux
+	rEventMux      *event.TypeMux
 	engine         consensus.Engine
 	accountManager *accounts.Manager
 
@@ -173,6 +174,7 @@ func New(ctx *node.ServiceContext, config *Config) (*Ethereum, error) {
 		refDb:          refDb,
 		chainConfig:    chainConfig,
 		eventMux:       ctx.EventMux,
+		rEventMux:      ctx.REventMux,
 		accountManager: ctx.AccountManager,
 		engine:         CreateConsensusEngine(ctx, chainConfig, config, config.MyShard, config.NumShard, config.MinerNotify, config.MinerNoverify, chainDb, refDb),
 		shutdownChan:   make(chan bool),
@@ -208,7 +210,7 @@ func New(ctx *node.ServiceContext, config *Config) (*Ethereum, error) {
 		eth.etherbase = crypto.PubkeyToAddress(ctx.NodeKey().PublicKey)
 	}
 
-	log.Info("Initialising Ethereum protocol", "versions", ProtocolVersions, "network", config.NetworkId, "total-shard", config.NumShard, "shard-id", config.MyShard)
+	log.Info("Initialising Ethereum protocol", "versions", ProtocolVersions, "network", config.NetworkId, "total-shard", config.NumShard, "shard-id", config.MyShard, "syncmode", config.SyncMode)
 
 	if !config.SkipBcVersionCheck {
 		bcVersion := rawdb.ReadDatabaseVersion(chainDb)
@@ -244,7 +246,7 @@ func New(ctx *node.ServiceContext, config *Config) (*Ethereum, error) {
 	}
 	eth.txPool = core.NewTxPool(config.TxPool, eth.chainConfig, eth.refAddress, eth.shardAddMap, eth.blockchain)
 
-	if eth.protocolManager, err = NewProtocolManager(eth.chainConfig, config.SyncMode, config.NumShard, config.MyShard, config.NetworkId, eth.eventMux, eth.txPool, eth.engine, eth.blockchain, eth.refchain, eth.refAddress, eth.shardAddMap, chainDb, refDb, config.RaftMode); err != nil {
+	if eth.protocolManager, err = NewProtocolManager(eth.chainConfig, config.SyncMode, config.NumShard, config.MyShard, config.NetworkId, eth.eventMux, eth.rEventMux, eth.txPool, eth.engine, eth.blockchain, eth.refchain, eth.refAddress, eth.shardAddMap, chainDb, refDb, config.RaftMode); err != nil {
 		return nil, err
 	}
 
@@ -547,6 +549,7 @@ func (s *Ethereum) AccountManager() *accounts.Manager  { return s.accountManager
 func (s *Ethereum) BlockChain() *core.BlockChain       { return s.blockchain }
 func (s *Ethereum) TxPool() *core.TxPool               { return s.txPool }
 func (s *Ethereum) EventMux() *event.TypeMux           { return s.eventMux }
+func (s *Ethereum) REventMux() *event.TypeMux          { return s.rEventMux }
 func (s *Ethereum) Engine() consensus.Engine           { return s.engine }
 func (s *Ethereum) ChainDb() ethdb.Database            { return s.chainDb }
 func (s *Ethereum) IsListening() bool                  { return true } // Always listening
@@ -603,6 +606,7 @@ func (s *Ethereum) Stop() error {
 	s.txPool.Stop()
 	s.miner.Stop()
 	s.eventMux.Stop()
+	s.rEventMux.Stop()
 
 	s.chainDb.Close()
 	close(s.shutdownChan)

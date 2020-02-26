@@ -42,14 +42,14 @@ const (
 )
 
 // New creates an Ethereum backend for Istanbul core engine.
-func New(config *istanbul.Config, privateKey *ecdsa.PrivateKey, myShard, numShard uint64, db, refdb ethdb.Database) consensus.Istanbul {
+func New(config *istanbul.Config, privateKey *ecdsa.PrivateKey, myshard, numShard uint64, db, refdb ethdb.Database) consensus.Istanbul {
 	// Allocate the snapshot caches and create the engine
 	recents, _ := lru.NewARC(inmemorySnapshots)
 	recentMessages, _ := lru.NewARC(inmemoryPeers)
 	knownMessages, _ := lru.NewARC(inmemoryMessages)
 	backend := &backend{
 		config:           config,
-		myShard:          myShard,
+		myshard:          myshard,
 		numShard:         numShard,
 		istanbulEventMux: new(event.TypeMux),
 		privateKey:       privateKey,
@@ -63,7 +63,7 @@ func New(config *istanbul.Config, privateKey *ecdsa.PrivateKey, myShard, numShar
 		recentMessages:   recentMessages,
 		knownMessages:    knownMessages,
 	}
-	backend.core = istanbulCore.New(backend, backend.config, myShard, numShard)
+	backend.core = istanbulCore.New(backend, backend.config, myshard, numShard)
 	return backend
 }
 
@@ -71,7 +71,7 @@ func New(config *istanbul.Config, privateKey *ecdsa.PrivateKey, myShard, numShar
 
 type backend struct {
 	config           *istanbul.Config
-	myShard          uint64
+	myshard          uint64
 	numShard         uint64
 	istanbulEventMux *event.TypeMux
 	privateKey       *ecdsa.PrivateKey
@@ -121,7 +121,7 @@ func (sb *backend) NumShard() uint64 {
 
 // MyShard returns local shard id
 func (sb *backend) MyShard() uint64 {
-	return sb.myShard
+	return sb.myshard
 }
 
 // Validators implements istanbul.Backend.Validators
