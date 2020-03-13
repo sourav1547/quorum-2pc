@@ -108,7 +108,11 @@ func (d *Downloader) runStateSync(s *stateSync) *stateSync {
 
 	// Listen for peer departure events to cancel assigned tasks
 	peerDrop := make(chan *peerConnection, 1024)
-	peerSub := s.d.cousinPeers[s.d.myshard].SubscribePeerDrops(peerDrop)
+	shard := s.d.myshard
+	if s.d.myref {
+		shard = uint64(0)
+	}
+	peerSub := s.d.cousinPeers[shard].SubscribePeerDrops(peerDrop)
 	defer peerSub.Unsubscribe()
 
 	for {
@@ -277,7 +281,11 @@ func (s *stateSync) Cancel() error {
 func (s *stateSync) loop() (err error) {
 	// Listen for new peer events to assign tasks to them
 	newPeer := make(chan *peerConnection, 1024)
-	peerSub := s.d.cousinPeers[s.d.myshard].SubscribeNewPeers(newPeer)
+	shard := s.d.myshard
+	if s.d.myref {
+		shard = uint64(0)
+	}
+	peerSub := s.d.cousinPeers[shard].SubscribeNewPeers(newPeer)
 	defer peerSub.Unsubscribe()
 	defer func() {
 		cerr := s.commit(true)
@@ -346,7 +354,11 @@ func (s *stateSync) commit(force bool) error {
 // batch currently being retried, or fetching new data from the trie sync itself.
 func (s *stateSync) assignTasks() {
 	// Iterate over all idle peers and try to assign them state fetches
-	peers, _ := s.d.cousinPeers[s.d.myshard].NodeDataIdlePeers()
+	shard := s.d.myshard
+	if s.d.myref {
+		shard = uint64(0)
+	}
+	peers, _ := s.d.cousinPeers[shard].NodeDataIdlePeers()
 	for _, p := range peers {
 		// Assign a batch of fetches proportional to the estimated latency/bandwidth
 		cap := p.NodeDataCapacity(s.d.requestRTT())
@@ -433,7 +445,11 @@ func (s *stateSync) process(req *stateReq) (int, error) {
 		}
 	}
 	// Put unfulfilled tasks back into the retry queue
-	npeers := s.d.cousinPeers[s.d.myshard].Len()
+	shard := s.d.myshard
+	if s.d.myref {
+		shard = uint64(0)
+	}
+	npeers := s.d.cousinPeers[shard].Len()
 	for hash, task := range req.tasks {
 		// If the node did deliver something, missing items may be due to a protocol
 		// limit or a previous timeout + delayed delivery. Both cases should permit

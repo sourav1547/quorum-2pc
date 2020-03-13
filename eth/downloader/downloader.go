@@ -713,12 +713,12 @@ func (d *Downloader) findAncestor(p *peerConnection, height uint64) (uint64, err
 		count = limit
 	}
 
-	bshard := d.myshard
+	shard := d.myshard
 	if d.myref {
-		bshard = uint64(0)
+		shard = uint64(0)
 	}
 
-	go p.peer.RequestHeadersByNumber(bshard, uint64(from), count, 15, false)
+	go p.peer.RequestHeadersByNumber(shard, uint64(from), count, 15, false)
 
 	// Wait for the remote response to the head fetch
 	number, hash := uint64(0), common.Hash{}
@@ -803,7 +803,7 @@ func (d *Downloader) findAncestor(p *peerConnection, height uint64) (uint64, err
 		ttl := d.requestTTL()
 		timeout := time.After(ttl)
 
-		go p.peer.RequestHeadersByNumber(bshard, check, 1, 0, false)
+		go p.peer.RequestHeadersByNumber(shard, check, 1, 0, false)
 
 		// Wait until a reply arrives to this request
 		for arrived := false; !arrived; {
@@ -887,17 +887,17 @@ func (d *Downloader) fetchHeaders(p *peerConnection, from uint64, pivot uint64) 
 		ttl = d.requestTTL()
 		timeout.Reset(ttl)
 
-		cshard := d.myshard
+		shard := d.myshard
 		if d.myref {
-			cshard = uint64(0)
+			shard = uint64(0)
 		}
 
 		if skeleton {
 			p.log.Trace("Fetching skeleton headers", "count", MaxHeaderFetch, "from", from)
-			go p.peer.RequestHeadersByNumber(cshard, from+uint64(MaxHeaderFetch)-1, MaxSkeletonSize, MaxHeaderFetch-1, false)
+			go p.peer.RequestHeadersByNumber(shard, from+uint64(MaxHeaderFetch)-1, MaxSkeletonSize, MaxHeaderFetch-1, false)
 		} else {
 			p.log.Trace("Fetching full headers", "count", MaxHeaderFetch, "from", from)
-			go p.peer.RequestHeadersByNumber(cshard, from, MaxHeaderFetch, 0, false)
+			go p.peer.RequestHeadersByNumber(shard, from, MaxHeaderFetch, 0, false)
 		}
 	}
 	// Start pulling the header chain skeleton until all is done
@@ -1044,6 +1044,11 @@ func (d *Downloader) fillHeaderSkeleton(from uint64, skeleton []*types.Header) (
 	log.Debug("Filling up skeleton", "from", from)
 	d.queue.ScheduleSkeleton(from, skeleton)
 
+	shard := d.myshard
+	if d.myref {
+		shard = uint64(0)
+	}
+
 	var (
 		deliver = func(packet dataPack) (int, error) {
 			pack := packet.(*headerPack)
@@ -1055,14 +1060,14 @@ func (d *Downloader) fillHeaderSkeleton(from uint64, skeleton []*types.Header) (
 			return d.queue.ReserveHeaders(p, count), false, nil
 		}
 		fetch = func(p *peerConnection, req *fetchRequest) error {
-			return p.FetchHeaders(d.myshard, req.From, MaxHeaderFetch)
+			return p.FetchHeaders(shard, req.From, MaxHeaderFetch)
 		}
 		capacity = func(p *peerConnection) int { return p.HeaderCapacity(d.requestRTT()) }
 		setIdle  = func(p *peerConnection, accepted int) { p.SetHeadersIdle(accepted) }
 	)
 	err := d.fetchParts(errCancelHeaderFetch, d.headerCh, deliver, d.queue.headerContCh, expire,
 		d.queue.PendingHeaders, d.queue.InFlightHeaders, throttle, reserve,
-		nil, fetch, d.queue.CancelHeaders, capacity, d.cousinPeers[d.myshard].HeaderIdlePeers, setIdle, "headers")
+		nil, fetch, d.queue.CancelHeaders, capacity, d.cousinPeers[shard].HeaderIdlePeers, setIdle, "headers")
 
 	log.Debug("Skeleton fill terminated", "err", err)
 
@@ -1075,9 +1080,9 @@ func (d *Downloader) fillHeaderSkeleton(from uint64, skeleton []*types.Header) (
 // and also periodically checking for timeouts.
 func (d *Downloader) fetchBodies(from uint64) error {
 	log.Debug("Downloading block bodies", "origin", from)
-	bshard := d.myshard
+	shard := d.myshard
 	if d.myref {
-		bshard = uint64(0)
+		shard = uint64(0)
 	}
 
 	var (
@@ -1086,14 +1091,14 @@ func (d *Downloader) fetchBodies(from uint64) error {
 			return d.queue.DeliverBodies(pack.peerID, pack.transactions, pack.uncles)
 		}
 		expire   = func() map[string]int { return d.queue.ExpireBodies(d.requestTTL()) }
-		fetch    = func(p *peerConnection, req *fetchRequest) error { return p.FetchBodies(bshard, req) }
+		fetch    = func(p *peerConnection, req *fetchRequest) error { return p.FetchBodies(shard, req) }
 		capacity = func(p *peerConnection) int { return p.BlockCapacity(d.requestRTT()) }
 		setIdle  = func(p *peerConnection, accepted int) { p.SetBodiesIdle(accepted) }
 	)
 
 	err := d.fetchParts(errCancelBodyFetch, d.bodyCh, deliver, d.bodyWakeCh, expire,
 		d.queue.PendingBlocks, d.queue.InFlightBlocks, d.queue.ShouldThrottleBlocks, d.queue.ReserveBodies,
-		d.bodyFetchHook, fetch, d.queue.CancelBodies, capacity, d.cousinPeers[d.myshard].BodyIdlePeers, setIdle, "bodies")
+		d.bodyFetchHook, fetch, d.queue.CancelBodies, capacity, d.cousinPeers[shard].BodyIdlePeers, setIdle, "bodies")
 	log.Debug("Block body download terminated", "err", err)
 	return err
 }
@@ -1104,9 +1109,9 @@ func (d *Downloader) fetchBodies(from uint64) error {
 func (d *Downloader) fetchReceipts(from uint64) error {
 	log.Debug("Downloading transaction receipts", "origin", from)
 
-	bshard := d.myshard
+	shard := d.myshard
 	if d.myref {
-		bshard = uint64(0)
+		shard = uint64(0)
 	}
 
 	var (
@@ -1115,14 +1120,14 @@ func (d *Downloader) fetchReceipts(from uint64) error {
 			return d.queue.DeliverReceipts(pack.peerID, pack.receipts)
 		}
 		expire   = func() map[string]int { return d.queue.ExpireReceipts(d.requestTTL()) }
-		fetch    = func(p *peerConnection, req *fetchRequest) error { return p.FetchReceipts(bshard, req) }
+		fetch    = func(p *peerConnection, req *fetchRequest) error { return p.FetchReceipts(shard, req) }
 		capacity = func(p *peerConnection) int { return p.ReceiptCapacity(d.requestRTT()) }
 		setIdle  = func(p *peerConnection, accepted int) { p.SetReceiptsIdle(accepted) }
 	)
 
 	err := d.fetchParts(errCancelReceiptFetch, d.receiptCh, deliver, d.receiptWakeCh, expire,
 		d.queue.PendingReceipts, d.queue.InFlightReceipts, d.queue.ShouldThrottleReceipts, d.queue.ReserveReceipts,
-		d.receiptFetchHook, fetch, d.queue.CancelReceipts, capacity, d.cousinPeers[d.myshard].ReceiptIdlePeers, setIdle, "receipts")
+		d.receiptFetchHook, fetch, d.queue.CancelReceipts, capacity, d.cousinPeers[shard].ReceiptIdlePeers, setIdle, "receipts")
 
 	log.Debug("Transaction receipt download terminated", "err", err)
 	return err
@@ -1164,9 +1169,9 @@ func (d *Downloader) fetchParts(errCancel error, deliveryCh chan dataPack, deliv
 
 	update := make(chan struct{}, 1)
 
-	bshard := d.myshard
+	shard := d.myshard
 	if d.myref {
-		bshard = uint64(0)
+		shard = uint64(0)
 	}
 
 	// Prepare the queue and fetch block parts until the block header fetcher's done
@@ -1180,7 +1185,7 @@ func (d *Downloader) fetchParts(errCancel error, deliveryCh chan dataPack, deliv
 			// If the peer was previously banned and failed to deliver its pack
 			// in a reasonable time frame, ignore its message.
 			d.cousinPeerLock.RLock()
-			if peer := d.cousinPeers[bshard].Peer(packet.PeerId()); peer != nil {
+			if peer := d.cousinPeers[shard].Peer(packet.PeerId()); peer != nil {
 				d.cousinPeerLock.RUnlock()
 				// Deliver the received chunk of data and check chain validity
 				accepted, err := deliver(packet)
@@ -1231,12 +1236,12 @@ func (d *Downloader) fetchParts(errCancel error, deliveryCh chan dataPack, deliv
 
 		case <-update:
 			// Short circuit if we lost all our peers
-			if d.cousinPeers[bshard].Len() == 0 {
+			if d.cousinPeers[shard].Len() == 0 {
 				return errNoPeers
 			}
 			// Check for fetch request timeouts and demote the responsible peers
 			for pid, fails := range expire() {
-				if peer := d.cousinPeers[bshard].Peer(pid); peer != nil {
+				if peer := d.cousinPeers[shard].Peer(pid); peer != nil {
 					// If a lot of retrieval elements expired, we might have overestimated the remote peer or perhaps
 					// ourselves. Only reset to minimal throughput but don't drop just yet. If even the minimal times
 					// out that sync wise we need to get rid of the peer.
@@ -1747,13 +1752,17 @@ func (d *Downloader) qosTuner() {
 	for {
 		// Retrieve the current median RTT and integrate into the previoust target RTT
 		d.cousinPeerLock.Lock()
-		if d.cousinPeers[d.myshard] == nil {
-			d.cousinPeers[d.myshard] = newPeerSet()
+		shard := d.myshard
+		if d.myref {
+			shard = uint64(0)
+		}
+		if d.cousinPeers[shard] == nil {
+			d.cousinPeers[shard] = newPeerSet()
 		}
 		d.cousinPeerLock.Unlock()
 
 		d.cousinPeerLock.RLock()
-		rtt := time.Duration((1-qosTuningImpact)*float64(atomic.LoadUint64(&d.rttEstimate)) + qosTuningImpact*float64(d.cousinPeers[d.myshard].medianRTT()))
+		rtt := time.Duration((1-qosTuningImpact)*float64(atomic.LoadUint64(&d.rttEstimate)) + qosTuningImpact*float64(d.cousinPeers[shard].medianRTT()))
 		d.cousinPeerLock.RUnlock()
 		atomic.StoreUint64(&d.rttEstimate, uint64(rtt))
 
@@ -1777,7 +1786,11 @@ func (d *Downloader) qosTuner() {
 func (d *Downloader) qosReduceConfidence() {
 	// If we have a single peer, confidence is always 1
 	d.cousinPeerLock.RLock()
-	peers := uint64(d.cousinPeers[d.myshard].Len())
+	shard := d.myshard
+	if d.myref {
+		shard = uint64(0)
+	}
+	peers := uint64(d.cousinPeers[shard].Len())
 	d.cousinPeerLock.RUnlock()
 	if peers == 0 {
 		// Ensure peer connectivity races don't catch us off guard
@@ -1848,11 +1861,11 @@ func (d *Downloader) syncWithPeerUntil(p *peerConnection, hash common.Hash, td *
 		log.Info("Synchronisation terminated", "duration", time.Since(start))
 	}(time.Now())
 
-	bshard := d.myshard
+	shard := d.myshard
 	if d.myref {
-		bshard = uint64(0)
+		shard = uint64(0)
 	}
-	remoteHeader, err := d.fetchHeader(bshard, p, hash)
+	remoteHeader, err := d.fetchHeader(shard, p, hash)
 	if err != nil {
 		return err
 	}
@@ -1956,17 +1969,23 @@ func (d *Downloader) fetchBoundedHeaders(p *peerConnection, from uint64, to uint
 			}
 		}
 
+		shard := d.myshard
+		if d.myref {
+			shard = uint64(0)
+		}
+
 		if skeleton {
 			numSkeletonHeaders := minInt(MaxSkeletonSize, (int(to-from)+1)/MaxHeaderFetch)
 			log.Trace("fetching skeleton headers", "peer", p, "num skeleton headers", numSkeletonHeaders, "from", from)
-			go p.peer.RequestHeadersByNumber(d.myshard, skeletonStart, numSkeletonHeaders, MaxHeaderFetch-1, false)
+
+			go p.peer.RequestHeadersByNumber(shard, skeletonStart, numSkeletonHeaders, MaxHeaderFetch-1, false)
 		} else {
 			// There are not enough headers remaining to warrant a skeleton fetch.
 			// Grab all of the remaining headers.
 
 			numHeaders := int(to-from) + 1
 			log.Trace("fetching full headers", "peer", p, "num headers", numHeaders, "from", from)
-			go p.peer.RequestHeadersByNumber(d.myshard, from, numHeaders, 0, false)
+			go p.peer.RequestHeadersByNumber(shard, from, numHeaders, 0, false)
 		}
 	}
 	// Start pulling the header chain skeleton until all is done
