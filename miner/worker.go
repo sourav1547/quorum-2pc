@@ -18,8 +18,10 @@ package miner
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"math/big"
+	"os"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -764,6 +766,104 @@ func (w *worker) commitTransaction(tx *types.Transaction, coinbase common.Addres
 	return logs, nil
 }
 
+func (w *worker) commitInitialContract(coinbase common.Address, interrupt *int32) bool {
+	if w.current == nil {
+		return true
+	}
+
+	file, err := os.Open("init-contracts.json")
+	if err != nil {
+		log.Error("Failed to read init-contracts file: %v", err)
+		return true
+	}
+	defer file.Close()
+
+	contracts := new(core.InitContracts)
+	if err := json.NewDecoder(file).Decode(contracts); err != nil {
+		log.Error("invalid init-contracts file", "error", err)
+		return true
+	}
+
+	var coalescedLogs []*types.Log
+
+	if w.current.gasPool == nil {
+		w.current.gasPool = new(core.GasPool).AddGas(w.current.header.GasLimit)
+	}
+
+	gasPrice := big.NewInt(0)
+	blkGasLimit := w.current.header.GasLimit
+	gasLimit := blkGasLimit / 100
+	// To check contract objects
+	for _, contract := range contracts.Contracts {
+
+		if interrupt != nil && atomic.LoadInt32(interrupt) != commitInterruptNone {
+			// Notify resubmit loop to increase resubmitting interval due to too frequent commits.
+			if atomic.LoadInt32(interrupt) == commitInterruptResubmit {
+				ratio := float64(w.current.header.GasLimit-w.current.gasPool.Gas()) / float64(w.current.header.GasLimit)
+				if ratio < 0.1 {
+					ratio = 0.1
+				}
+				w.resubmitAdjustCh <- &intervalAdjust{
+					ratio: ratio,
+					inc:   true,
+				}
+			}
+			return atomic.LoadInt32(interrupt) == commitInterruptNewHead
+		}
+
+		tx := types.NewContractCreation(types.ContractInit, contract.Nonce, w.eth.MyShard(), contract.Balance, gasLimit, gasPrice, contract.Code)
+
+		w.current.state.Prepare(tx.Hash(), common.Hash{}, w.current.tcount)
+		w.current.privateState.Prepare(tx.Hash(), common.Hash{}, w.current.tcount)
+
+		snap := w.current.state.Snapshot()
+		privateSnap := w.current.privateState.Snapshot()
+
+		receipt, privateReceipt, _, err := core.ApplyTransaction(w.config, w.chain, &coinbase, w.current.gasPool, w.current.state, w.current.privateState, w.current.header, tx, &w.current.header.GasUsed, vm.Config{})
+		if err != nil {
+			w.current.state.RevertToSnapshot(snap)
+			w.current.privateState.RevertToSnapshot(privateSnap)
+			log.Error("Contract intialiazation failed with", "error", err)
+			continue
+		}
+		w.current.txs = append(w.current.txs, tx)
+		w.current.receipts = append(w.current.receipts, receipt)
+
+		logs := receipt.Logs
+		if privateReceipt != nil {
+			logs = append(receipt.Logs, privateReceipt.Logs...)
+			w.current.privateReceipts = append(w.current.privateReceipts, privateReceipt)
+		}
+
+		coalescedLogs = append(coalescedLogs, logs...)
+		w.current.tcount++
+	}
+
+	if !w.isRunning() && len(coalescedLogs) > 0 {
+		// We don't push the pendingLogsEvent while we are mining. The reason is that
+		// when we are mining, the worker will regenerate a mining block every 3 seconds.
+		// In order to avoid pushing the repeated pendingLog, we disable the pending log pushing.
+
+		// make a copy, the state caches the logs and these logs get "upgraded" from pending to mined
+		// logs by filling in the block hash when the block was mined by the local miner. This can
+		// cause a race condition if a log was "upgraded" before the PendingLogsEvent is processed.
+		cpy := make([]*types.Log, len(coalescedLogs))
+		for i, l := range coalescedLogs {
+			cpy[i] = new(types.Log)
+			*cpy[i] = *l
+		}
+		go w.mux.Post(core.PendingLogsEvent{Logs: cpy})
+	}
+	// Notify resubmit loop to decrease resubmitting interval if current interval is larger
+	// than the user-specified one.
+	if interrupt != nil {
+		w.resubmitAdjustCh <- &intervalAdjust{inc: false}
+	}
+
+	// Todo: Double check whatever it does.
+	return false
+}
+
 func (w *worker) commitTransactions(txs *types.TransactionsByPriceAndNonce, coinbase common.Address, interrupt *int32) bool {
 	// Short circuit if current is nil
 	if w.current == nil {
@@ -965,6 +1065,15 @@ func (w *worker) commitNewWork(interrupt *int32, noempty bool, timestamp int64) 
 	// Prefer to locally generated uncle
 	commitUncles(w.localUncles)
 	commitUncles(w.remoteUncles)
+
+	// // If the block is first block, then deploy all contracts
+	if header.Number.Cmp(common.Big1) == 0 && w.eth.MyShard() == uint64(0) {
+		if w.commitInitialContract(w.coinbase, interrupt) {
+			return
+		}
+		w.commit(uncles, w.fullTaskHook, true, tstart)
+		return
+	}
 
 	if !noempty {
 		// Create an empty block based on temporary copied state for sealing in advance without waiting block

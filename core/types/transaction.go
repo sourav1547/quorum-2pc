@@ -36,10 +36,11 @@ import (
 
 // Various transaction Type
 const (
-	StateCommit = uint64(0) // State Commitment Transaction
-	IntraShard  = uint64(1) // Intra Shard Transaction
-	CrossShard  = uint64(2) // Cross Shard Transaction
-	Others      = uint64(3)
+	StateCommit  = uint64(0) // State Commitment Transaction
+	IntraShard   = uint64(1) // Intra Shard Transaction
+	CrossShard   = uint64(2) // Cross Shard Transaction
+	ContractInit = uint64(3) // Initializing Contracts
+	Others       = uint64(4)
 )
 
 var (
@@ -98,13 +99,34 @@ type txdataMarshaling struct {
 	S            *hexutil.Big
 }
 
+// RefAddress Returns the refAddress
+func RefAddress() common.Address {
+	seed := "6462473A8D4913910C5AAA748EA82CD67EB4B73D"
+	refAddress := new(big.Int)
+	refAddress, _ = refAddress.SetString(seed, 16)
+	return common.BigToAddress(refAddress)
+}
+
+// ShardAddress returns the unique address of each shard!
+func ShardAddress(shard uint64) common.Address {
+	seed := "6462473A8D4913910C5AAA748EA82CD67EB4B73D"
+	refAddress := new(big.Int)
+	refAddress, _ = refAddress.SetString(seed, 16)
+	addr := new(big.Int).SetUint64(shard)
+	addr.Add(addr, refAddress)
+	return common.BigToAddress(addr)
+}
+
 func NewTransaction(txType, nonce uint64, shard uint64, to common.Address, amount *big.Int, gasLimit uint64, gasPrice *big.Int, data []byte) *Transaction {
 	return newTransaction(txType, nonce, shard, &to, amount, gasLimit, gasPrice, data)
 }
 
 // NewContractCreation creates a new contract
-func NewContractCreation(nonce uint64, amount *big.Int, gasLimit uint64, gasPrice *big.Int, data []byte) *Transaction {
-	return newTransaction(uint64(0), nonce, uint64(0), nil, amount, gasLimit, gasPrice, data)
+// func NewContractCreation(nonce uint64, amount *big.Int, gasLimit uint64, gasPrice *big.Int, data []byte) *Transaction {
+// 	return newTransaction(uint64(0), nonce, uint64(0), nil, amount, gasLimit, gasPrice, data)
+// }
+func NewContractCreation(txType, nonce uint64, shard uint64, amount *big.Int, gasLimit uint64, gasPrice *big.Int, data []byte) *Transaction {
+	return newTransaction(txType, nonce, uint64(0), nil, amount, gasLimit, gasPrice, data)
 }
 
 func newTransaction(txType, nonce uint64, shard uint64, to *common.Address, amount *big.Int, gasLimit uint64, gasPrice *big.Int, data []byte) *Transaction {
@@ -132,6 +154,11 @@ func newTransaction(txType, nonce uint64, shard uint64, to *common.Address, amou
 	}
 
 	return &Transaction{data: d}
+}
+
+// SetRecipient updates the recipient of a transaction
+func (tx *Transaction) SetRecipient(to *common.Address) {
+	tx.data.Recipient = to
 }
 
 // ChainId returns which chain id this transaction was signed for (if at all)

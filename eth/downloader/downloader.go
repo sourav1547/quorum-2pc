@@ -345,7 +345,6 @@ func (d *Downloader) UnregisterPeer(id string) error {
 	d.cancelLock.RUnlock()
 
 	if master {
-		log.Info("@lock, peer Unregistered", "id", id)
 		d.cancel()
 	}
 	return nil
@@ -392,7 +391,6 @@ func (d *Downloader) synchronise(id string, hash common.Hash, td *big.Int, mode 
 	if !atomic.CompareAndSwapInt32(&d.synchronising, 0, 1) {
 		return errBusy
 	}
-	types.SetSyncStatus(d.myref)
 	defer atomic.StoreInt32(&d.synchronising, 0)
 
 	// Post a user notification of the sync (only once per session)
@@ -578,9 +576,7 @@ func (d *Downloader) spawnSync(fetchers []func() error) error {
 		}
 	}
 	d.queue.Close()
-	log.Info("@lock, Cancelled from spawnSync")
 	d.Cancel()
-	log.Info("@lock, returning error in spawnSync", "err", err)
 	return err
 }
 

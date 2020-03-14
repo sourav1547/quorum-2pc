@@ -241,7 +241,7 @@ func (c *BoundContract) transact(opts *TransactOpts, contract *common.Address, i
 	// Create the transaction, sign it and schedule it for execution
 	var rawTx *types.Transaction
 	if contract == nil {
-		rawTx = types.NewContractCreation(nonce, value, gasLimit, gasPrice, input)
+		rawTx = types.NewContractCreation(opts.TxType.Uint64(), nonce, opts.Shard.Uint64(), value, gasLimit, gasPrice, input)
 	} else {
 		rawTx = types.NewTransaction(opts.TxType.Uint64(), nonce, opts.Shard.Uint64(), c.address, value, gasLimit, gasPrice, input)
 	}
@@ -378,7 +378,7 @@ func (c *BoundContract) UnpackLog(out interface{}, event string, log types.Log) 
 func (c *BoundContract) createPrivateTransaction(tx *types.Transaction, payload []byte) *types.Transaction {
 	var privateTx *types.Transaction
 	if tx.To() == nil {
-		privateTx = types.NewContractCreation(tx.Nonce(), tx.Value(), tx.Gas(), tx.GasPrice(), payload)
+		privateTx = types.NewContractCreation(tx.TxType(), tx.Nonce(), tx.Shard(), tx.Value(), tx.Gas(), tx.GasPrice(), payload)
 	} else {
 		privateTx = types.NewTransaction(tx.TxType(), tx.Nonce(), tx.Shard(), c.address, tx.Value(), tx.Gas(), tx.GasPrice(), payload)
 	}

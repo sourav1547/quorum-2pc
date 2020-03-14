@@ -93,6 +93,8 @@ type BlockChain struct {
 	chainConfig *params.ChainConfig // Chain & network configuration
 	cacheConfig *CacheConfig        // Cache configuration for pruning
 
+	commitAddress common.Address
+
 	db     ethdb.Database // Low level persistent database to store final content in
 	triegc *prque.Prque   // Priority queue mapping block numbers to tries to gc
 	gcproc time.Duration  // Accumulates canonical block processing for trie dumping
@@ -209,6 +211,11 @@ func NewBlockChain(db ethdb.Database, cacheConfig *CacheConfig, chainConfig *par
 
 func (bc *BlockChain) getProcInterrupt() bool {
 	return atomic.LoadInt32(&bc.procInterrupt) == 1
+}
+
+// CommitAddress Returns the address of the state commitment transaction
+func (bc *BlockChain) CommitAddress() common.Address {
+	return bc.commitAddress
 }
 
 // loadLastState loads the last known chain state from the database. This method
@@ -1306,6 +1313,13 @@ func (bc *BlockChain) insertChain(chain types.Blocks) (int, []interface{}, []*ty
 
 			// Only count canonical blocks for GC processing time
 			bc.gcproc += proctime
+
+			// Initializing the address of the state commitment transaction
+			if block.NumberU64() == uint64(1) {
+				if len(block.Transactions()) > 0 {
+					bc.commitAddress = receipts[0].ContractAddress
+				}
+			}
 
 		case SideStatTy:
 			log.Debug("Inserted forked block", "number", block.Number(), "hash", block.Hash(), "diff", block.Difficulty(), "elapsed",

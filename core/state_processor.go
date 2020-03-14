@@ -106,6 +106,11 @@ func ApplyTransaction(config *params.ChainConfig, bc *BlockChain, author *common
 		return nil, nil, 0, ErrInvalidGasPrice
 	}
 
+	// Updating the address of the transaction
+	if tx.TxType() == types.StateCommit {
+		commitAddress := bc.CommitAddress()
+		tx.SetRecipient(&commitAddress)
+	}
 	msg, err := tx.AsMessage(types.MakeSigner(config, header.Number))
 	if err != nil {
 		return nil, nil, 0, err

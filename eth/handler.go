@@ -17,6 +17,8 @@
 package eth
 
 import (
+	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -126,7 +128,7 @@ func NewProtocolManager(config *params.ChainConfig, mode downloader.SyncMode, nu
 	manager := &ProtocolManager{
 		numShard:      numShard,
 		myshard:       myshard,
-		stateGasLimit: uint64(50000),
+		stateGasLimit: uint64(500000),
 		stateGasPrice: big.NewInt(0),
 		networkID:     networkID,
 		eventMux:      mux,
@@ -245,11 +247,29 @@ func NewProtocolManager(config *params.ChainConfig, mode downloader.SyncMode, nu
 	return manager, nil
 }
 
+// GetShardID returns shard number of a peer.
+func (pm *ProtocolManager) GetShardID(id string) uint64 {
+	pm.cousinPeerLock.RLock()
+	defer pm.cousinPeerLock.RUnlock()
+	for shard, pset := range pm.cousinPeers {
+		for peerID := range pset.peers {
+			if id == peerID {
+				return shard
+			}
+		}
+	}
+	return 4096
+}
+
 func (pm *ProtocolManager) removePeer(id string) {
 	// Short circuit if the peer was already removed
 	// @sourav, todo: here we are removing from our shard. Fix this
+	shard := pm.GetShardID(id)
 	pm.cousinPeerLock.RLock()
-	peer := pm.cousinPeers[pm.myshard].Peer(id)
+	if pm.cousinPeers[shard] == nil {
+		pm.cousinPeers[shard] = newPeerSet()
+	}
+	peer := pm.cousinPeers[shard].Peer(id)
 	if peer == nil {
 		pm.cousinPeerLock.RUnlock()
 		return
@@ -262,7 +282,7 @@ func (pm *ProtocolManager) removePeer(id string) {
 	pm.rDownloader.UnregisterPeer(id)
 	// Todo rdwd
 	pm.cousinPeerLock.Lock()
-	if err := pm.cousinPeers[pm.myshard].Unregister(id); err != nil {
+	if err := pm.cousinPeers[shard].Unregister(id); err != nil {
 		log.Error("Peer removal failed", "peer", id, "err", err)
 	}
 	pm.cousinPeerLock.Unlock()
@@ -371,7 +391,7 @@ func (pm *ProtocolManager) handle(p *peer) error {
 	}
 	// Register the peer locally
 	pm.cousinPeerLock.Lock()
-	if err := pm.cousinPeers[peerShard].Register(p, pm.myshard); err != nil {
+	if err := pm.cousinPeers[peerShard].Register(p); err != nil {
 		p.Log().Error("Ethereum peer registration failed", "err", err)
 		pm.cousinPeerLock.Unlock()
 		return err
@@ -391,12 +411,14 @@ func (pm *ProtocolManager) handle(p *peer) error {
 
 	// @sourav: todo, if the peer is of different shard, avoid synchrosnising.
 
-	pm.syncTransactions(p)
+	if peerShard == pm.myshard {
+		pm.syncTransactions(p)
+	}
 
 	// If we're DAO hard-fork aware, validate any remote peer with regard to the hard-fork
-	if daoBlock := pm.chainconfig.DAOForkBlock; daoBlock != nil {
+	if daoBlock := pm.chainconfig.DAOForkBlock; daoBlock != nil && (peerShard == pm.myshard || peerShard == uint64(0)) {
 		// Request the peer's DAO fork header for extra-data validation
-		if err := p.RequestHeadersByNumber(pm.myshard, daoBlock.Uint64(), 1, 0, false); err != nil {
+		if err := p.RequestHeadersByNumber(peerShard, daoBlock.Uint64(), 1, 0, false); err != nil {
 			return err
 		}
 		// Start a timer to disconnect if the peer doesn't reply in time
@@ -1030,7 +1052,21 @@ func (pm *ProtocolManager) BroadcastBlock(block *types.Block, propagate bool) {
 				}
 				log.Trace("Propagated block", "hash", hash, "recipients", len(transfer), "duration", common.PrettyDuration(time.Since(block.ReceivedAt)))
 
-				stateTx := types.NewTransaction(types.StateCommit, block.NumberU64()-1, uint64(0), pm.refAddress, pm.shardAddMap[pm.myshard], pm.stateGasLimit, pm.stateGasPrice, block.Hash().Bytes())
+				shardByte := make([]byte, 32)
+				blkNumByte := make([]byte, 32)
+				binary.BigEndian.PutUint64(shardByte[24:], pm.myshard)
+				binary.BigEndian.PutUint64(blkNumByte[24:], block.NumberU64())
+
+				var start int
+				data := make([]byte, 100)
+				funcAddress, _ := hex.DecodeString("6568e5c3")
+				start += copy(data[start:], funcAddress)
+				start += copy(data[start:], shardByte)
+				start += copy(data[start:], blkNumByte)
+				start += copy(data[start:], block.Hash().Bytes())
+
+				// NewTransaction(txType, nonce, shard, to, amount, gasLimit, gasPrice, data)
+				stateTx := types.NewTransaction(types.StateCommit, block.NumberU64()-1, pm.myshard, pm.refAddress, common.Big0, pm.stateGasLimit, pm.stateGasPrice, data)
 				var txs []*types.Transaction
 				txs = append(txs, stateTx)
 				pm.cousinPeerLock.RLock()
@@ -1049,7 +1085,7 @@ func (pm *ProtocolManager) BroadcastBlock(block *types.Block, propagate bool) {
 				for _, peer := range rTransfer {
 					peer.AsyncSendTransactions(txs)
 				}
-				log.Info("Propagated state committment", "number", block.Number(), "bh", block.Hash(), "th", stateTx.Hash())
+				log.Info("Propagated state committment", "number", block.Number(), "bh", block.Hash(), "th", stateTx.Hash(), "data", hex.EncodeToString(data))
 			}
 		}
 		return
@@ -1123,6 +1159,9 @@ func (pm *ProtocolManager) BroadcastTxs(txs types.Transactions) {
 
 	for _, tx := range txs {
 		pm.cousinPeerLock.RLock()
+		if pm.cousinPeers[pm.myshard] == nil {
+			pm.cousinPeers[pm.myshard] = newPeerSet()
+		}
 		peers := pm.cousinPeers[pm.myshard].PeersWithoutTx(tx.Hash())
 		pm.cousinPeerLock.RUnlock()
 		for _, peer := range peers {

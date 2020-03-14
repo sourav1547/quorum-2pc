@@ -62,6 +62,13 @@ type Genesis struct {
 	ParentHash common.Hash `json:"parentHash"`
 }
 
+type InitContracts struct {
+	Contracts ContractAlloc `json:"contracts"      gencodec:"required"`
+}
+
+// ContractAlloc specifies the code initial contracts
+type ContractAlloc map[common.Address]GenesisAccount
+
 // GenesisAlloc specifies the initial state that is part of the genesis block.
 type GenesisAlloc map[common.Address]GenesisAccount
 

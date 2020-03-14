@@ -123,7 +123,7 @@ func newPeer(shard uint64, version int, p *p2p.Peer, rw p2p.MsgReadWriter) *peer
 // broadcast is a write loop that multiplexes block propagations, announcements
 // and transaction broadcasts into the remote peer. The goal is to have an async
 // writer that does not lock up node internals.
-func (p *peer) broadcast(localShard uint64) {
+func (p *peer) broadcast() {
 	for {
 		select {
 		case txs := <-p.queuedTxs:
@@ -505,7 +505,7 @@ func newPeerSet() *peerSet {
 // Register injects a new peer into the working set, or returns an error if the
 // peer is already known. If a new peer it registered, its broadcast loop is also
 // started.
-func (ps *peerSet) Register(p *peer, localShard uint64) error {
+func (ps *peerSet) Register(p *peer) error {
 	ps.lock.Lock()
 	defer ps.lock.Unlock()
 
@@ -516,7 +516,7 @@ func (ps *peerSet) Register(p *peer, localShard uint64) error {
 		return errAlreadyRegistered
 	}
 	ps.peers[p.id] = p
-	go p.broadcast(localShard)
+	go p.broadcast()
 
 	return nil
 }
