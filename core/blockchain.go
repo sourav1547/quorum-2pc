@@ -89,6 +89,7 @@ type CacheConfig struct {
 // included in the canonical one where as GetBlockByNumber always represents the
 // canonical chain.
 type BlockChain struct {
+	myshard     uint64              // To
 	ref         bool                // To indicate a reference chain
 	chainConfig *params.ChainConfig // Chain & network configuration
 	cacheConfig *CacheConfig        // Cache configuration for pruning
@@ -143,7 +144,7 @@ type BlockChain struct {
 // NewBlockChain returns a fully initialised block chain using information
 // available in the database. It initialises the default Ethereum Validator and
 // Processor.
-func NewBlockChain(db ethdb.Database, cacheConfig *CacheConfig, chainConfig *params.ChainConfig, engine consensus.Engine, vmConfig vm.Config, shouldPreserve func(block *types.Block) bool, ref bool) (*BlockChain, error) {
+func NewBlockChain(db ethdb.Database, cacheConfig *CacheConfig, chainConfig *params.ChainConfig, engine consensus.Engine, vmConfig vm.Config, shouldPreserve func(block *types.Block) bool, ref bool, shard uint64) (*BlockChain, error) {
 	if cacheConfig == nil {
 		cacheConfig = &CacheConfig{
 			TrieNodeLimit: 256,
@@ -158,6 +159,7 @@ func NewBlockChain(db ethdb.Database, cacheConfig *CacheConfig, chainConfig *par
 	badBlocks, _ := lru.New(badBlockLimit)
 
 	bc := &BlockChain{
+		myshard:           shard,
 		ref:               ref,
 		chainConfig:       chainConfig,
 		cacheConfig:       cacheConfig,
@@ -641,6 +643,11 @@ func (bc *BlockChain) GetBlockByNumber(number uint64) *types.Block {
 		return nil
 	}
 	return bc.GetBlock(hash, number)
+}
+
+// GetGenesisHash returns hash of the geneis block
+func (bc *BlockChain) GetGenesisHash() common.Hash {
+	return rawdb.ReadCanonicalHash(bc.db, uint64(0))
 }
 
 // GetReceiptsByHash retrieves the receipts for all transactions in a given block.

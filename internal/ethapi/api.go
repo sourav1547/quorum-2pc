@@ -953,6 +953,8 @@ func RPCMarshalBlock(b *types.Block, inclTx bool, fullTx bool) (map[string]inter
 		"hash":             b.Hash(),
 		"parentHash":       head.ParentHash,
 		"nonce":            head.Nonce,
+		"refNumber":        b.RefNumberU64(),
+		"refHash":          b.RefHash(),
 		"mixHash":          head.MixDigest,
 		"sha3Uncles":       head.UncleHash,
 		"logsBloom":        head.Bloom,

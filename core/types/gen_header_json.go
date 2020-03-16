@@ -24,6 +24,7 @@ func (h Header) MarshalJSON() ([]byte, error) {
 		Bloom       Bloom          `json:"logsBloom"        gencodec:"required"`
 		Difficulty  *hexutil.Big   `json:"difficulty"       gencodec:"required"`
 		Number      *hexutil.Big   `json:"number"           gencodec:"required"`
+		RefNumber   *hexutil.Big   `json:"refNumber" 		gencodec:"required"`
 		Shard       hexutil.Uint64 `json:"shard"	        gencodec:"required"`
 		GasLimit    hexutil.Uint64 `json:"gasLimit"         gencodec:"required"`
 		GasUsed     hexutil.Uint64 `json:"gasUsed"          gencodec:"required"`
@@ -31,10 +32,12 @@ func (h Header) MarshalJSON() ([]byte, error) {
 		Extra       hexutil.Bytes  `json:"extraData"        gencodec:"required"`
 		MixDigest   common.Hash    `json:"mixHash"          gencodec:"required"`
 		Nonce       BlockNonce     `json:"nonce"            gencodec:"required"`
+		RefHash     common.Hash    `json:"refHash" 			gencodec:"required"`
 		Hash        common.Hash    `json:"hash"`
 	}
 	var enc Header
 	enc.ParentHash = h.ParentHash
+	enc.RefHash = h.RefHash
 	enc.UncleHash = h.UncleHash
 	enc.Coinbase = h.Coinbase
 	enc.Root = h.Root
@@ -43,6 +46,7 @@ func (h Header) MarshalJSON() ([]byte, error) {
 	enc.Bloom = h.Bloom
 	enc.Difficulty = (*hexutil.Big)(h.Difficulty)
 	enc.Number = (*hexutil.Big)(h.Number)
+	enc.RefNumber = (*hexutil.Big)(h.RefNumber)
 	enc.Shard = hexutil.Uint64(h.Shard)
 	enc.GasLimit = hexutil.Uint64(h.GasLimit)
 	enc.GasUsed = hexutil.Uint64(h.GasUsed)
@@ -65,6 +69,7 @@ func (h *Header) UnmarshalJSON(input []byte) error {
 		Bloom       *Bloom          `json:"logsBloom"        gencodec:"required"`
 		Difficulty  *hexutil.Big    `json:"difficulty"       gencodec:"required"`
 		Number      *hexutil.Big    `json:"number"           gencodec:"required"`
+		RefNumber   *hexutil.Big    `json:"refNumber"        gencodec:"required"`
 		Shard       *hexutil.Uint64 `json:"shard"	         gencodec:"required"`
 		GasLimit    *hexutil.Uint64 `json:"gasLimit"         gencodec:"required"`
 		GasUsed     *hexutil.Uint64 `json:"gasUsed"          gencodec:"required"`
@@ -72,6 +77,7 @@ func (h *Header) UnmarshalJSON(input []byte) error {
 		Extra       *hexutil.Bytes  `json:"extraData"        gencodec:"required"`
 		MixDigest   *common.Hash    `json:"mixHash"          gencodec:"required"`
 		Nonce       *BlockNonce     `json:"nonce"            gencodec:"required"`
+		RefHash     *common.Hash    `json:"refHash" 		 gencodec:"required"`
 	}
 	var dec Header
 	if err := json.Unmarshal(input, &dec); err != nil {
@@ -85,6 +91,10 @@ func (h *Header) UnmarshalJSON(input []byte) error {
 		return errors.New("missing required field 'sha3Uncles' for Header")
 	}
 	h.UncleHash = *dec.UncleHash
+	if dec.RefHash == nil {
+		return errors.New("missing required field 'refHash' for Header")
+	}
+	h.RefHash = *dec.RefHash
 	if dec.Coinbase == nil {
 		return errors.New("missing required field 'miner' for Header")
 	}
@@ -113,6 +123,10 @@ func (h *Header) UnmarshalJSON(input []byte) error {
 		return errors.New("missing required field 'number' for Header")
 	}
 	h.Number = (*big.Int)(dec.Number)
+	if dec.RefNumber == nil {
+		return errors.New("missing required field 'refNumber' for Header")
+	}
+	h.RefNumber = (*big.Int)(dec.RefNumber)
 	if dec.Shard == nil {
 		return errors.New("missing required field 'shard' for Header")
 	}

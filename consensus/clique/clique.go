@@ -153,6 +153,7 @@ func sigHash(header *types.Header) (hash common.Hash) {
 	rlp.Encode(hasher, []interface{}{
 		header.ParentHash,
 		header.UncleHash,
+		header.RefHash,
 		header.Coinbase,
 		header.Root,
 		header.TxHash,
@@ -160,6 +161,7 @@ func sigHash(header *types.Header) (hash common.Hash) {
 		header.Bloom,
 		header.Difficulty,
 		header.Number,
+		header.RefNumber,
 		header.GasLimit,
 		header.GasUsed,
 		header.Time,

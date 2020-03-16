@@ -138,6 +138,9 @@ type worker struct {
 	eth    Backend
 	chain  *core.BlockChain
 
+	refHash   common.Hash
+	refNumber *big.Int
+
 	gasFloor uint64
 	gasCeil  uint64
 
@@ -196,6 +199,8 @@ func newWorker(config *params.ChainConfig, engine consensus.Engine, eth Backend,
 		eth:                eth,
 		mux:                mux,
 		chain:              eth.BlockChain(),
+		refNumber:          common.Big0,
+		refHash:            eth.BlockChain().GetGenesisHash(),
 		gasFloor:           gasFloor,
 		gasCeil:            gasCeil,
 		isLocalBlock:       isLocalBlock,
@@ -978,6 +983,18 @@ func (w *worker) commitTransactions(txs *types.TransactionsByPriceAndNonce, coin
 	return false
 }
 
+func (w *worker) isRef() bool {
+	return w.eth.MyShard() == uint64(0)
+}
+
+func (w *worker) getRefHash() common.Hash {
+	return w.refHash
+}
+
+func (w *worker) getRefNumber() *big.Int {
+	return w.refNumber
+}
+
 // commitNewWork generates several new sealing tasks based on the parent block.
 func (w *worker) commitNewWork(interrupt *int32, noempty bool, timestamp int64) {
 	w.mu.RLock()
@@ -1005,6 +1022,12 @@ func (w *worker) commitNewWork(interrupt *int32, noempty bool, timestamp int64) 
 		Extra:      w.extra,
 		Time:       big.NewInt(timestamp),
 	}
+
+	if w.eth.MyShard() > uint64(0) {
+		header.RefHash = w.getRefHash()
+		header.RefNumber = w.getRefNumber()
+	}
+
 	// Only set the coinbase if our consensus engine is running (avoid spurious block rewards)
 	if w.isRunning() {
 		if w.coinbase == (common.Address{}) {
