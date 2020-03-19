@@ -776,7 +776,13 @@ func (w *worker) commitInitialContract(coinbase common.Address, interrupt *int32
 		return true
 	}
 
-	file, err := os.Open("init-contracts.json")
+	path := ""
+	if w.eth.MyShard() == uint64(0) {
+		path = "init-contracts0.json"
+	} else {
+		path = "init-contracts1.json"
+	}
+	file, err := os.Open(path)
 	if err != nil {
 		log.Error("Failed to read init-contracts file: %v", err)
 		return true
