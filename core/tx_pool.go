@@ -659,6 +659,9 @@ func (pool *TxPool) add(tx *types.Transaction, local bool) (bool, error) {
 	// If the transaction is already known, discard it
 	hash := tx.Hash()
 	if pool.all.Get(hash) != nil {
+		if tx.TxType() == uint64(2) {
+			log.Info("Discarding already known transaction", "hash", hash)
+		}
 		log.Trace("Discarding already known transaction", "hash", hash)
 		return false, fmt.Errorf("known transaction: %x", hash)
 	}
@@ -667,6 +670,9 @@ func (pool *TxPool) add(tx *types.Transaction, local bool) (bool, error) {
 	if tx.TxType() != types.StateCommit {
 		// If the transaction fails basic validation, discard it
 		if err := pool.validateTx(tx, local); err != nil {
+			if tx.TxType() != uint64(2) {
+				log.Info("Discarding invalid transaction", "hash", hash, "err", err)
+			}
 			log.Trace("Discarding invalid transaction", "hash", hash, "err", err)
 			invalidTxCounter.Inc(1)
 			return false, err
@@ -682,6 +688,9 @@ func (pool *TxPool) add(tx *types.Transaction, local bool) (bool, error) {
 	if uint64(pool.all.Count()) >= pool.config.GlobalSlots+pool.config.GlobalQueue {
 		// If the new transaction is underpriced, don't accept it
 		if !pool.chainconfig.IsQuorum && !local && pool.priced.Underpriced(tx, pool.locals) {
+			if tx.TxType() == uint64(2) {
+				log.Info("Discarding underpriced transaction", "hash", hash, "price", tx.GasPrice())
+			}
 			log.Trace("Discarding underpriced transaction", "hash", hash, "price", tx.GasPrice())
 			underpricedTxCounter.Inc(1)
 			return false, ErrUnderpriced
@@ -689,6 +698,9 @@ func (pool *TxPool) add(tx *types.Transaction, local bool) (bool, error) {
 		// New transaction is better than our worse ones, make room for it
 		drop := pool.priced.Discard(pool.all.Count()-int(pool.config.GlobalSlots+pool.config.GlobalQueue-1), pool.locals)
 		for _, tx := range drop {
+			if tx.TxType() == uint64(2) {
+				log.Info("Discarding freshly underpriced transaction", "hash", tx.Hash(), "price", tx.GasPrice())
+			}
 			log.Trace("Discarding freshly underpriced transaction", "hash", tx.Hash(), "price", tx.GasPrice())
 			underpricedTxCounter.Inc(1)
 			pool.removeTx(tx.Hash(), false)
@@ -713,6 +725,9 @@ func (pool *TxPool) add(tx *types.Transaction, local bool) (bool, error) {
 		pool.priced.Put(tx)
 		pool.journalTx(from, tx)
 
+		if tx.TxType() == uint64(2) {
+			log.Info("Pooled new executable transaction", "hash", hash, "from", from, "to", tx.To())
+		}
 		log.Trace("Pooled new executable transaction", "hash", hash, "from", from, "to", tx.To())
 
 		// We've directly injected a replacement transaction, notify subsystems
@@ -734,6 +749,9 @@ func (pool *TxPool) add(tx *types.Transaction, local bool) (bool, error) {
 	}
 	pool.journalTx(from, tx)
 
+	if tx.TxType() == uint64(2) {
+		log.Info("Pooled new future transaction", "hash", hash, "from", from, "to", tx.To())
+	}
 	log.Trace("Pooled new future transaction", "hash", hash, "from", from, "to", tx.To())
 	return replace, nil
 }
@@ -855,6 +873,7 @@ func (pool *TxPool) addTx(tx *types.Transaction, local bool) error {
 	defer pool.mu.Unlock()
 
 	// Try to inject the transaction and update any state
+	log.Info("@cs, calling pool.add", "thash", tx.Hash())
 	replace, err := pool.add(tx, local)
 	if err != nil {
 		return err

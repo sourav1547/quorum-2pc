@@ -72,9 +72,13 @@ func SignTx(tx *Transaction, s Signer, prv *ecdsa.PrivateKey) (*Transaction, err
 func Sender(signer Signer, tx *Transaction) (common.Address, error) {
 	if tx.TxType() == StateCommit {
 		return ShardAddress(tx.Shard()), nil
-	}
-	if tx.TxType() == ContractInit {
+	} else if tx.TxType() == ContractInit {
 		return RefAddress(), nil
+	} else if tx.TxType() == CrossShardLocal {
+		if sc := tx.from.Load(); sc != nil {
+			sigCache := sc.(sigCache)
+			return sigCache.from, nil
+		}
 	}
 	if sc := tx.from.Load(); sc != nil {
 		sigCache := sc.(sigCache)

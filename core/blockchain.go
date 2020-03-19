@@ -211,6 +211,11 @@ func NewBlockChain(db ethdb.Database, cacheConfig *CacheConfig, chainConfig *par
 	return bc, nil
 }
 
+// MyShard retuns shard of a blockchain
+func (bc *BlockChain) MyShard() uint64 {
+	return bc.myshard
+}
+
 func (bc *BlockChain) getProcInterrupt() bool {
 	return atomic.LoadInt32(&bc.procInterrupt) == 1
 }

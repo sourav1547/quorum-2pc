@@ -1097,6 +1097,9 @@ func (pm *ProtocolManager) BroadcastBlock(block *types.Block, propagate bool) {
 		if pm.refchain.HasBlock(hash, block.NumberU64()) {
 			receipients := 0
 			pm.cousinPeerLock.RLock()
+			if pm.cousinPeers[pm.myshard] == nil {
+				pm.cousinPeers[pm.myshard] = newPeerSet()
+			}
 			peers := pm.cousinPeers[pm.myshard].PeersWithoutBlock(hash)
 			pm.cousinPeerLock.RUnlock()
 			for _, peer := range peers {

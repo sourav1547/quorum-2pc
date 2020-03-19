@@ -36,11 +36,12 @@ import (
 
 // Various transaction Type
 const (
-	StateCommit  = uint64(0) // State Commitment Transaction
-	IntraShard   = uint64(1) // Intra Shard Transaction
-	CrossShard   = uint64(2) // Cross Shard Transaction
-	ContractInit = uint64(3) // Initializing Contracts
-	Others       = uint64(4)
+	StateCommit     = uint64(0) // State Commitment Transaction
+	IntraShard      = uint64(1) // Intra Shard Transaction
+	CrossShard      = uint64(2) // Cross Shard Transaction
+	ContractInit    = uint64(3) // Initializing Contracts
+	CrossShardLocal = uint64(4) // Cross shard transaction for local execution.
+	Others          = uint64(5)
 )
 
 var (
@@ -304,6 +305,11 @@ func (tx *Transaction) AsMessage(s Signer) (Message, error) {
 	return msg, err
 }
 
+// SetFrom stores senders address
+func (tx *Transaction) SetFrom(addr common.Address) {
+	tx.from.Store(sigCache{from: addr})
+}
+
 // WithSignature returns a new transaction with the given signature.
 // This signature needs to be formatted as described in the yellow paper (v+27).
 func (tx *Transaction) WithSignature(signer Signer, sig []byte) (*Transaction, error) {
@@ -505,6 +511,20 @@ func (t *TransactionsByPriceAndNonce) Shift() {
 // and hence all subsequent ones should be discarded from the same account.
 func (t *TransactionsByPriceAndNonce) Pop() {
 	heap.Pop(&t.heads)
+}
+
+// CKeys implement keys involved in a cross-shard transaction
+type CKeys struct {
+	Addr common.Address
+	Keys []uint64
+}
+
+// CrossTx structure type of cross shard transactions
+type CrossTx struct {
+	Shards       []uint64
+	BlockNum     *big.Int
+	Tx           *Transaction
+	AllContracts map[uint64][]CKeys
 }
 
 // Message is a fully derived transaction and implements core.Message
