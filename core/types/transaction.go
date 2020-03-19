@@ -21,6 +21,7 @@ import (
 	"errors"
 	"io"
 	"math/big"
+	"sync"
 	"sync/atomic"
 
 	fmt "fmt"
@@ -525,6 +526,53 @@ type CrossTx struct {
 	BlockNum     *big.Int
 	Tx           *Transaction
 	AllContracts map[uint64][]CKeys
+}
+
+// CrossShardTxs stores index:txn for any given block
+type CrossShardTxs struct {
+	lock sync.RWMutex
+	txs  map[uint64]*CrossTx // index:transaction
+}
+
+// NewCrossShardTxs for some block number
+func NewCrossShardTxs() CrossShardTxs {
+	return CrossShardTxs{
+		txs: make(map[uint64]*CrossTx),
+	}
+}
+
+// AddTransaction to add a cross shard transaction
+func (cst CrossShardTxs) AddTransaction(index uint64, tx *CrossTx) {
+	cst.lock.Lock()
+	cst.txs[index] = tx
+	cst.lock.Unlock()
+}
+
+// Commitment of a particular shard
+type Commitment struct {
+	Shard     uint64
+	BlockNum  *big.Int
+	StateRoot common.Hash
+}
+
+// Commitments of all the shards
+type Commitments struct {
+	lock    sync.RWMutex
+	commits map[uint64]*Commitment
+}
+
+// NewCommitments creates a new commitments
+func NewCommitments() Commitments {
+	return Commitments{
+		commits: make(map[uint64]*Commitment),
+	}
+}
+
+// AddCommit adds a commit for some particular shard
+func (cm Commitments) AddCommit(shard uint64, commit *Commitment) {
+	cm.lock.Lock()
+	cm.commits[shard] = commit
+	cm.lock.Unlock()
 }
 
 // Message is a fully derived transaction and implements core.Message

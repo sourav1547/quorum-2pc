@@ -18,6 +18,8 @@
 package core
 
 import (
+	"encoding/binary"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -94,7 +96,11 @@ type BlockChain struct {
 	chainConfig *params.ChainConfig // Chain & network configuration
 	cacheConfig *CacheConfig        // Cache configuration for pruning
 
-	commitAddress common.Address
+	commitAddress   common.Address                 // Address of state commitment transaction
+	pendingCrossTxs map[uint64]types.CrossShardTxs // Pending Cross shard transactions
+	commitments     map[uint64]types.Commitments   // Known commitments for each shard
+	myLatestCommit  *types.Commitment              // Latest committed block
+	commitLock      sync.RWMutex                   // Lock to prevent concurrent access
 
 	db     ethdb.Database // Low level persistent database to store final content in
 	triegc *prque.Prque   // Priority queue mapping block numbers to tries to gc
@@ -144,7 +150,7 @@ type BlockChain struct {
 // NewBlockChain returns a fully initialised block chain using information
 // available in the database. It initialises the default Ethereum Validator and
 // Processor.
-func NewBlockChain(db ethdb.Database, cacheConfig *CacheConfig, chainConfig *params.ChainConfig, engine consensus.Engine, vmConfig vm.Config, shouldPreserve func(block *types.Block) bool, ref bool, shard uint64) (*BlockChain, error) {
+func NewBlockChain(db ethdb.Database, cacheConfig *CacheConfig, chainConfig *params.ChainConfig, engine consensus.Engine, vmConfig vm.Config, shouldPreserve func(block *types.Block) bool, ref bool, shard uint64, commitments map[uint64]types.Commitments, pendingCrossTxs map[uint64]types.CrossShardTxs, myLatestCommit *types.Commitment, commitLock sync.RWMutex) (*BlockChain, error) {
 	if cacheConfig == nil {
 		cacheConfig = &CacheConfig{
 			TrieNodeLimit: 256,
@@ -177,6 +183,10 @@ func NewBlockChain(db ethdb.Database, cacheConfig *CacheConfig, chainConfig *par
 		vmConfig:          vmConfig,
 		badBlocks:         badBlocks,
 		privateStateCache: state.NewDatabase(db),
+		pendingCrossTxs:   pendingCrossTxs,
+		commitments:       commitments,
+		myLatestCommit:    myLatestCommit,
+		commitLock:        commitLock,
 	}
 	bc.SetValidator(NewBlockValidator(chainConfig, bc, engine))
 	bc.SetProcessor(NewStateProcessor(chainConfig, bc, engine))
@@ -193,6 +203,9 @@ func NewBlockChain(db ethdb.Database, cacheConfig *CacheConfig, chainConfig *par
 	if err := bc.loadLastState(); err != nil {
 		return nil, err
 	}
+	bc.commitLock.Lock()
+	bc.myLatestCommit.StateRoot = bc.genesisBlock.Root()
+	bc.commitLock.Unlock()
 	// Check the current state of the block hashes and make sure that we do not have any of the bad blocks in our chain
 	for hash := range BadHashes {
 		if header := bc.GetHeaderByHash(hash); header != nil {
@@ -1333,6 +1346,11 @@ func (bc *BlockChain) insertChain(chain types.Blocks) (int, []interface{}, []*ty
 				}
 			}
 
+			// Parse transactions in reference chain to check for new state commitments
+			if bc.ref {
+				bc.ParseBlock(block, receipts)
+			}
+
 		case SideStatTy:
 			log.Debug("Inserted forked block", "number", block.Number(), "hash", block.Hash(), "diff", block.Difficulty(), "elapsed",
 				common.PrettyDuration(time.Since(bstart)), "txs", len(block.Transactions()), "gas", block.GasUsed(), "uncles", len(block.Uncles()))
@@ -1356,6 +1374,177 @@ func (bc *BlockChain) insertChain(chain types.Blocks) (int, []interface{}, []*ty
 	}
 
 	return 0, events, coalescedLogs, nil
+}
+
+// ParseBlock function extracts necessary information from a reference block
+func (bc *BlockChain) ParseBlock(block *types.Block, receipts types.Receipts) {
+	elemSize := 32
+	u64Offset := 24
+	myshard := bc.MyShard()
+	refNum := block.NumberU64()
+
+	for i, tx := range block.Transactions() {
+		// Checking execution status of the transaction
+		receipt := receipts[i]
+		rStatus := receipt.Status == uint64(1)
+		txStatus := false
+		var eventOutput uint64
+		if rStatus {
+			if tx.TxType() == types.CrossShard || tx.TxType() == types.StateCommit {
+				eventOutput = binary.BigEndian.Uint64(receipt.Logs[0].Data[u64Offset:])
+				txStatus = eventOutput == uint64(1)
+			}
+		} else {
+			log.Warn("Transaction Execution failed!", "th", tx.Hash(), "type", tx.TxType())
+			continue
+		}
+
+		if txStatus {
+			if tx.TxType() == types.CrossShard {
+				data := tx.Data()[4:]
+				shardsInvolved, involved := bc.DecodeCrossTx(myshard, data)
+				if involved {
+					numShards := len(shardsInvolved)
+					startIndex := (2+1+numShards)*elemSize + elemSize // Last 32 bytes to avoid string length
+					crossTx := bc.ParseCrossTxData(uint16(numShards), data[2+startIndex:])
+					crossTx.BlockNum = block.Number()
+					log.Info("New cross shard transaction added!", "bn", refNum, "shards", shardsInvolved)
+
+					if _, ok := bc.pendingCrossTxs[refNum]; !ok {
+						bc.pendingCrossTxs[refNum] = types.NewCrossShardTxs()
+					}
+					bc.pendingCrossTxs[refNum].AddTransaction(uint64(i), crossTx)
+
+				} else {
+					log.Debug("Local shard not involved in cross shard transaction", "hash", tx.Hash())
+				}
+			} else if tx.TxType() == types.StateCommit {
+				data := tx.Data()[4:]
+				startIndex := 0
+				shard := binary.BigEndian.Uint64(data[startIndex+u64Offset : startIndex+elemSize])
+				startIndex += elemSize
+
+				blockNum := new(big.Int)
+				blockNum.SetBytes(data[startIndex+u64Offset : startIndex+elemSize])
+				startIndex += 2 * elemSize
+				stateRoot := common.BytesToHash(data[startIndex:])
+				commit := &types.Commitment{Shard: shard, BlockNum: blockNum, StateRoot: stateRoot}
+				if shard == bc.myshard {
+					bc.commitLock.Lock()
+					bc.myLatestCommit = commit
+					bc.commitLock.Unlock()
+					log.Info("Updated Latest commit", "rn", refNum, "bn", (*commit.BlockNum).Uint64())
+					bc.CleanPendingTx(refNum, commit)
+				} else {
+					if _, ok := bc.commitments[refNum]; !ok {
+						bc.commitments[refNum] = types.NewCommitments()
+					}
+					bc.commitments[refNum].AddCommit(shard, commit)
+					log.Info("New commit added for ", "shard", shard, "rn", refNum, "bn", (*commit.BlockNum).Uint64())
+				}
+			}
+		} else {
+			log.Info("Unsuccesful transaction execution!", "status", receipt.Status, "event", eventOutput, "txType", tx.TxType(), "hash", tx.Hash())
+		}
+	}
+}
+
+// CleanPendingTx removes commited cross-shard transactions
+func (bc *BlockChain) CleanPendingTx(blockNum uint64, commit *types.Commitment) {
+	for num := range bc.commitments {
+		if num < blockNum {
+			if _, ok := bc.commitments[num]; ok {
+				delete(bc.commitments, num)
+				log.Debug("Cleaning old commitments for", "rbn", num)
+			}
+		}
+	}
+
+	for num := range bc.pendingCrossTxs {
+		if num < blockNum {
+			if _, ok := bc.pendingCrossTxs[num]; ok {
+				delete(bc.pendingCrossTxs, num)
+				log.Info("Cleaning cross shard transactions for", "rbn", num)
+			}
+		}
+	}
+}
+
+// ParseCrossTxData parsed data
+func (bc *BlockChain) ParseCrossTxData(numShard uint16, data []byte) *types.CrossTx {
+	startIndex := uint16(0)
+	elemSize := uint16(32)
+	addrSize := uint16(20)
+	crossTx := &types.CrossTx{
+		Shards:       []uint64{},
+		AllContracts: make(map[uint64][]types.CKeys),
+	}
+	for i := uint16(0); i < numShard; i++ {
+		shard := binary.BigEndian.Uint16(data[startIndex : startIndex+2])
+
+		crossTx.Shards = append(crossTx.Shards, uint64(shard))
+		crossTx.AllContracts[uint64(shard)] = []types.CKeys{}
+		startIndex = startIndex + 2
+		numContracts := binary.BigEndian.Uint16(data[startIndex : startIndex+2])
+		startIndex = startIndex + 2
+
+		if numContracts > 0 {
+			for j := uint16(0); j < numContracts; j++ {
+				addr := common.BytesToAddress(data[startIndex : startIndex+addrSize])
+				startIndex = startIndex + addrSize
+				numKeys := binary.BigEndian.Uint16(data[startIndex : startIndex+2])
+				startIndex = startIndex + 2
+				cKeys := &types.CKeys{Addr: addr, Keys: []uint64{}}
+				for k := uint16(0); k < numKeys; k++ {
+					key := binary.BigEndian.Uint64(data[startIndex+24 : startIndex+elemSize])
+					cKeys.Keys = append(cKeys.Keys, key)
+					startIndex = startIndex + elemSize
+				}
+				crossTx.AllContracts[uint64(shard)] = append(crossTx.AllContracts[uint64(shard)], *cKeys)
+			}
+		}
+	}
+
+	sender := common.BytesToAddress(data[startIndex : startIndex+addrSize])
+	startIndex = startIndex + addrSize
+	nonce := binary.BigEndian.Uint32(data[startIndex : startIndex+uint16(4)])
+	startIndex = startIndex + uint16(4)
+	value := binary.BigEndian.Uint32(data[startIndex : startIndex+uint16(4)])
+	startIndex = startIndex + uint16(4)
+	receiver := common.BytesToAddress(data[startIndex : startIndex+addrSize])
+	startIndex = startIndex + addrSize
+	gasLimit := binary.BigEndian.Uint64(data[startIndex : startIndex+uint16(8)])
+	startIndex = startIndex + uint16(8)
+	gasPrice := binary.BigEndian.Uint64(data[startIndex : startIndex+uint16(8)])
+	startIndex = startIndex + uint16(8)
+	funcSig := hex.EncodeToString(data[startIndex : startIndex+uint16(4)])
+	startIndex = startIndex + uint16(4)
+	log.Info("Cross shard Transaction information", "from", sender, "to", receiver, "nonce", nonce, "value", value, "function", funcSig, "gl", gasLimit, "gp", gasPrice, "params", hex.EncodeToString(data[startIndex:]))
+	tx := types.NewTransaction(types.CrossShardLocal, uint64(nonce), uint64(0), receiver, big.NewInt(int64(value)), gasLimit, big.NewInt(int64(gasPrice)), data[startIndex:])
+	tx.SetFrom(sender)
+	crossTx.Tx = tx
+	return crossTx
+}
+
+// DecodeCrossTx extracts shards
+func (bc *BlockChain) DecodeCrossTx(myshard uint64, data []byte) ([]uint64, bool) {
+	elemSize := uint64(32)
+	lenData := data[2*elemSize+elemSize-8 : 3*elemSize]
+	length := binary.BigEndian.Uint64(lenData)
+	startIndex := 3 * elemSize
+	var (
+		involved = false
+		shards   []uint64
+	)
+	for i := uint64(0); i < length; i++ {
+		shardData := data[startIndex+i*elemSize+24 : startIndex+(i+1)*elemSize]
+		shard := binary.BigEndian.Uint64(shardData)
+		if shard == myshard {
+			involved = true
+		}
+		shards = append(shards, shard)
+	}
+	return shards, involved
 }
 
 // insertStats tracks and reports on block insertion.

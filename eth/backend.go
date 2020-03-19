@@ -72,6 +72,11 @@ type Ethereum struct {
 	// Channel for shutting down the service
 	shutdownChan chan bool // Channel for shutting down the Ethereum
 
+	pendingCrossTxs map[uint64]types.CrossShardTxs // Pending Cross shard transactions
+	commitments     map[uint64]types.Commitments   // Known commitments for each shard
+	myLatestCommit  *types.Commitment              // Latest committed block
+	commitLock      sync.RWMutex                   // Lock to prevent concurrent access to myLatestCommit
+
 	// Handlers
 	txPool          *core.TxPool
 	blockchain      *core.BlockChain
@@ -169,25 +174,27 @@ func New(ctx *node.ServiceContext, config *Config) (*Ethereum, error) {
 	}
 
 	eth := &Ethereum{
-		config:         config,
-		chainDb:        chainDb,
-		refDb:          refDb,
-		chainConfig:    chainConfig,
-		eventMux:       ctx.EventMux,
-		rEventMux:      ctx.REventMux,
-		accountManager: ctx.AccountManager,
-		engine:         CreateConsensusEngine(ctx, chainConfig, config, config.MyShard, config.NumShard, config.MinerNotify, config.MinerNoverify, chainDb, refDb),
-		shutdownChan:   make(chan bool),
-		numShard:       config.NumShard,
-		myShard:        config.MyShard,
-		networkID:      config.NetworkId,
-		gasPrice:       config.MinerGasPrice,
-		etherbase:      config.Etherbase,
-		bloomRequests:  make(chan chan *bloombits.Retrieval),
-		refRequests:    make(chan chan *bloombits.Retrieval),
-		bloomIndexer:   NewBloomIndexer(chainDb, params.BloomBitsBlocks, params.BloomConfirms),
-		refIndexer:     NewBloomIndexer(refDb, params.BloomBitsBlocks, params.BloomConfirms),
-		shardAddMap:    make(map[uint64]*big.Int),
+		config:          config,
+		chainDb:         chainDb,
+		refDb:           refDb,
+		chainConfig:     chainConfig,
+		eventMux:        ctx.EventMux,
+		rEventMux:       ctx.REventMux,
+		accountManager:  ctx.AccountManager,
+		engine:          CreateConsensusEngine(ctx, chainConfig, config, config.MyShard, config.NumShard, config.MinerNotify, config.MinerNoverify, chainDb, refDb),
+		shutdownChan:    make(chan bool),
+		numShard:        config.NumShard,
+		myShard:         config.MyShard,
+		networkID:       config.NetworkId,
+		gasPrice:        config.MinerGasPrice,
+		etherbase:       config.Etherbase,
+		bloomRequests:   make(chan chan *bloombits.Retrieval),
+		refRequests:     make(chan chan *bloombits.Retrieval),
+		bloomIndexer:    NewBloomIndexer(chainDb, params.BloomBitsBlocks, params.BloomConfirms),
+		refIndexer:      NewBloomIndexer(refDb, params.BloomBitsBlocks, params.BloomConfirms),
+		shardAddMap:     make(map[uint64]*big.Int),
+		pendingCrossTxs: make(map[uint64]types.CrossShardTxs),
+		commitments:     make(map[uint64]types.Commitments),
 	}
 
 	// To initialize address with shard
@@ -205,6 +212,7 @@ func New(ctx *node.ServiceContext, config *Config) (*Ethereum, error) {
 		log.Debug("Address created for ", "shard", i, "address", common.BigToAddress(addr))
 	}
 
+	eth.myLatestCommit = &types.Commitment{Shard: config.MyShard, BlockNum: common.Big0} // Latest committed block
 	// force to set the istanbul etherbase to node key address
 	if chainConfig.Istanbul != nil {
 		eth.etherbase = crypto.PubkeyToAddress(ctx.NodeKey().PublicKey)
@@ -227,8 +235,8 @@ func New(ctx *node.ServiceContext, config *Config) (*Ethereum, error) {
 		}
 		cacheConfig = &core.CacheConfig{Disabled: config.NoPruning, TrieNodeLimit: config.TrieCache, TrieTimeLimit: config.TrieTimeout}
 	)
-	eth.blockchain, err = core.NewBlockChain(chainDb, cacheConfig, eth.chainConfig, eth.engine, vmConfig, eth.shouldPreserve, false, config.MyShard)
-	eth.refchain, rerr = core.NewBlockChain(refDb, cacheConfig, eth.chainConfig, eth.engine, vmConfig, eth.shouldPreserve, true, config.MyShard)
+	eth.blockchain, err = core.NewBlockChain(chainDb, cacheConfig, eth.chainConfig, eth.engine, vmConfig, eth.shouldPreserve, false, config.MyShard, eth.commitments, eth.pendingCrossTxs, eth.myLatestCommit, eth.commitLock)
+	eth.refchain, rerr = core.NewBlockChain(refDb, cacheConfig, eth.chainConfig, eth.engine, vmConfig, eth.shouldPreserve, true, config.MyShard, eth.commitments, eth.pendingCrossTxs, eth.myLatestCommit, eth.commitLock)
 	if err != nil {
 		return nil, err
 	}

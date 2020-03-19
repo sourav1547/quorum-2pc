@@ -1054,15 +1054,19 @@ func (pm *ProtocolManager) BroadcastBlock(block *types.Block, propagate bool) {
 
 				shardByte := make([]byte, 32)
 				blkNumByte := make([]byte, 32)
+				refBlkNumByte := make([]byte, 32)
 				binary.BigEndian.PutUint64(shardByte[24:], pm.myshard)
 				binary.BigEndian.PutUint64(blkNumByte[24:], block.NumberU64())
+				binary.BigEndian.PutUint64(refBlkNumByte[24:], block.RefNumberU64())
 
 				var start int
-				data := make([]byte, 100)
-				funcAddress, _ := hex.DecodeString("6568e5c3")
+				dataLen := 4*32 + 4
+				data := make([]byte, dataLen)
+				funcAddress, _ := hex.DecodeString("8a31297a")
 				start += copy(data[start:], funcAddress)
 				start += copy(data[start:], shardByte)
 				start += copy(data[start:], blkNumByte)
+				start += copy(data[start:], refBlkNumByte)
 				start += copy(data[start:], block.Hash().Bytes())
 
 				// NewTransaction(txType, nonce, shard, to, amount, gasLimit, gasPrice, data)

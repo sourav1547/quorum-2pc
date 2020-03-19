@@ -17,10 +17,6 @@
 package core
 
 import (
-	"encoding/binary"
-	"encoding/hex"
-	"math/big"
-
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/consensus"
 	"github.com/ethereum/go-ethereum/consensus/misc"
@@ -28,7 +24,6 @@ import (
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/core/vm"
 	"github.com/ethereum/go-ethereum/crypto"
-	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/params"
 )
 
@@ -67,7 +62,6 @@ func (p *StateProcessor) Process(block *types.Block, statedb, privateState *stat
 		allLogs  []*types.Log
 		gp       = new(GasPool).AddGas(block.GasLimit())
 
-		crossTxs        []*types.CrossTx
 		privateReceipts types.Receipts
 	)
 	// Mutate the block and state according to any hard-fork specs
@@ -92,139 +86,10 @@ func (p *StateProcessor) Process(block *types.Block, statedb, privateState *stat
 			privateReceipts = append(privateReceipts, privateReceipt)
 			allLogs = append(allLogs, privateReceipt.Logs...)
 		}
-
-		myshard := p.bc.MyShard()
-		if tx.TxType() == types.CrossShard && myshard > uint64(0) {
-
-			data := tx.Data()[4:]
-			shardsInvolved, involved := DecodeCrossTx(myshard, data)
-			if involved {
-				elemSize := 32
-				numShards := len(shardsInvolved)
-				startIndex := (2+1+numShards)*elemSize + elemSize // Last 32 bytes to avoid string length
-				crossTx := ParseCrossTxData(uint16(numShards), data[2+startIndex:])
-				crossTx.BlockNum = block.Number()
-				crossTxs = append(crossTxs, crossTx)
-				log.Info("New cross shard transaction added!", "bn", block.NumberU64(), "shards", shardsInvolved)
-			} else {
-				log.Debug("Local shard not involved in cross shard transaction", "hash", tx.Hash())
-			}
-		}
 	}
 	// Finalize the block, applying any consensus engine specific extras (e.g. block rewards)
 	p.engine.Finalize(p.bc, header, statedb, block.Transactions(), block.Uncles(), receipts)
 	return receipts, privateReceipts, allLogs, *usedGas, nil
-}
-
-/**
-	Num shard: 2 (2 bytes)
-		Shard Id: 2 (2 bytes)
-			Num contracts: 1 (2 bytes)
-			Contract Id: 0xd5A39372C999DEEfAC30e44861D55A5F7f95a60F (20 bytes)
-				Num Keys: 10 (2 bytes)
-				Key 1: (32 bytes)
-				Key 1: (32 bytes)
-					...
-				Key k: (32 bytes)
-			Contract Id: ... (32 bytes)
-				Num Keys: 10 (2 bytes)
-				Key 1: (32 bytes)
-				Key 1: (32 bytes)
-					...
-				Key k: (32 bytes)
-
-				...
-			Contract Id: ... (32 bytes)
-				Num Keys: 10 (2 bytes)
-				Key 1: (32 bytes)
-				Key 1: (32 bytes)
-					...
-				Key k: (32 bytes)
-	Sender Id: ... (20 bytes)
-	Nonce: ... (4 bytes)
-	Value: ... (4 bytes)
-	Receiver: ... (32 bytes)
-	GasLimit: ... (8 bytes)
-	GasPrice: ... (8 bytes)
-	Function sign: ... (4 bytes)
-	Function params: ... (a*32 bytes) # a is the number of paramers
-**/
-
-// ParseCrossTxData parsed data
-func ParseCrossTxData(numShard uint16, data []byte) *types.CrossTx {
-	startIndex := uint16(0)
-	elemSize := uint16(32)
-	addrSize := uint16(20)
-	crossTx := &types.CrossTx{
-		Shards:       []uint64{},
-		AllContracts: make(map[uint64][]types.CKeys),
-	}
-	for i := uint16(0); i < numShard; i++ {
-		shard := binary.BigEndian.Uint16(data[startIndex : startIndex+2])
-
-		crossTx.Shards = append(crossTx.Shards, uint64(shard))
-		crossTx.AllContracts[uint64(shard)] = []types.CKeys{}
-		startIndex = startIndex + 2
-		numContracts := binary.BigEndian.Uint16(data[startIndex : startIndex+2])
-		startIndex = startIndex + 2
-
-		if numContracts > 0 {
-			for j := uint16(0); j < numContracts; j++ {
-				addr := common.BytesToAddress(data[startIndex : startIndex+addrSize])
-				startIndex = startIndex + addrSize
-				numKeys := binary.BigEndian.Uint16(data[startIndex : startIndex+2])
-				startIndex = startIndex + 2
-				cKeys := &types.CKeys{Addr: addr, Keys: []uint64{}}
-				for k := uint16(0); k < numKeys; k++ {
-					key := binary.BigEndian.Uint64(data[startIndex+24 : startIndex+elemSize])
-					cKeys.Keys = append(cKeys.Keys, key)
-					startIndex = startIndex + elemSize
-				}
-				crossTx.AllContracts[uint64(shard)] = append(crossTx.AllContracts[uint64(shard)], *cKeys)
-			}
-		}
-	}
-
-	sender := common.BytesToAddress(data[startIndex : startIndex+addrSize])
-	startIndex = startIndex + addrSize
-	nonce := binary.BigEndian.Uint32(data[startIndex : startIndex+uint16(4)])
-	startIndex = startIndex + uint16(4)
-	value := binary.BigEndian.Uint32(data[startIndex : startIndex+uint16(4)])
-	startIndex = startIndex + uint16(4)
-	receiver := common.BytesToAddress(data[startIndex : startIndex+addrSize])
-	startIndex = startIndex + addrSize
-	gasLimit := binary.BigEndian.Uint64(data[startIndex : startIndex+uint16(8)])
-	startIndex = startIndex + uint16(8)
-	gasPrice := binary.BigEndian.Uint64(data[startIndex : startIndex+uint16(8)])
-	startIndex = startIndex + uint16(8)
-	funcSig := hex.EncodeToString(data[startIndex : startIndex+uint16(4)])
-	startIndex = startIndex + uint16(4)
-	log.Info("Cross shard Transaction information", "from", sender, "to", receiver, "nonce", nonce, "value", value, "function", funcSig, "gl", gasLimit, "gp", gasPrice, "params", hex.EncodeToString(data[startIndex:]))
-	tx := types.NewTransaction(types.CrossShardLocal, uint64(nonce), uint64(0), receiver, big.NewInt(int64(value)), gasLimit, big.NewInt(int64(gasPrice)), data[startIndex:])
-	tx.SetFrom(sender)
-	crossTx.Tx = tx
-	return crossTx
-}
-
-// DecodeCrossTx extracts shards
-func DecodeCrossTx(myshard uint64, data []byte) ([]uint64, bool) {
-	elemSize := uint64(32)
-	lenData := data[2*elemSize+elemSize-8 : 3*elemSize]
-	length := binary.BigEndian.Uint64(lenData)
-	startIndex := 3 * elemSize
-	var (
-		involved = false
-		shards   []uint64
-	)
-	for i := uint64(0); i < length; i++ {
-		shardData := data[startIndex+i*elemSize+24 : startIndex+(i+1)*elemSize]
-		shard := binary.BigEndian.Uint64(shardData)
-		if shard == myshard {
-			involved = true
-		}
-		shards = append(shards, shard)
-	}
-	return shards, involved
 }
 
 // ApplyTransaction attempts to apply a transaction to the given state database

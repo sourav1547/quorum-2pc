@@ -449,6 +449,9 @@ func (d *Downloader) synchronise(id string, hash common.Hash, td *big.Int, mode 
 	// Retrieve the origin peer and initiate the downloading process
 	shardID := d.GetShardID(id)
 	d.cousinPeerLock.RLock()
+	if _, ok := d.cousinPeers[shardID]; !ok {
+		d.cousinPeers[shardID] = newPeerSet()
+	}
 	p := d.cousinPeers[shardID].Peer(id)
 	d.cousinPeerLock.RUnlock()
 	if p == nil {
