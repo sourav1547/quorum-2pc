@@ -1089,7 +1089,7 @@ func (pm *ProtocolManager) BroadcastBlock(block *types.Block, propagate bool) {
 				for _, peer := range rTransfer {
 					peer.AsyncSendTransactions(txs)
 				}
-				log.Info("Propagated state committment", "number", block.Number(), "bh", block.Hash(), "th", stateTx.Hash(), "data", hex.EncodeToString(data))
+				log.Debug("Propagated state committment", "number", block.Number(), "bh", block.Hash(), "th", stateTx.Hash(), "data", hex.EncodeToString(data))
 			}
 		}
 		return

@@ -138,20 +138,26 @@ type worker struct {
 	eth    Backend
 	chain  *core.BlockChain
 
-	refHash   common.Hash
-	refNumber *big.Int
+	refHash         common.Hash                    // Hash of the last knwon reference block
+	refNumber       *big.Int                       // Last know reference block
+	pendingCrossTxs map[uint64]types.CrossShardTxs // Pending Cross shard transactions
+	commitments     map[uint64]types.Commitments   // Known commitments for each shard
+	myLatestCommit  *types.Commitment              // Latest committed block
+	commitLock      sync.RWMutex                   // Lock to prevent concurrent access
 
 	gasFloor uint64
 	gasCeil  uint64
 
 	// Subscriptions
-	mux          *event.TypeMux
-	txsCh        chan core.NewTxsEvent
-	txsSub       event.Subscription
-	chainHeadCh  chan core.ChainHeadEvent
-	chainHeadSub event.Subscription
-	chainSideCh  chan core.ChainSideEvent
-	chainSideSub event.Subscription
+	mux           *event.TypeMux
+	txsCh         chan core.NewTxsEvent
+	txsSub        event.Subscription
+	chainHeadCh   chan core.ChainHeadEvent
+	chainHeadSub  event.Subscription
+	rChainHeadCh  chan core.ChainHeadEvent
+	rChainHeadSub event.Subscription
+	chainSideCh   chan core.ChainSideEvent
+	chainSideSub  event.Subscription
 
 	// Channels
 	newWorkCh          chan *newWorkReq
@@ -192,7 +198,7 @@ type worker struct {
 	resubmitHook func(time.Duration, time.Duration) // Method to call upon updating resubmitting interval.
 }
 
-func newWorker(config *params.ChainConfig, engine consensus.Engine, eth Backend, mux *event.TypeMux, recommit time.Duration, gasFloor, gasCeil uint64, isLocalBlock func(*types.Block) bool) *worker {
+func newWorker(config *params.ChainConfig, engine consensus.Engine, eth Backend, mux *event.TypeMux, recommit time.Duration, gasFloor, gasCeil uint64, isLocalBlock func(*types.Block) bool, commitments map[uint64]types.Commitments, pendingCrossTxs map[uint64]types.CrossShardTxs, myLatestCommit *types.Commitment, commitLock sync.RWMutex) *worker {
 	worker := &worker{
 		config:             config,
 		engine:             engine,
@@ -210,6 +216,7 @@ func newWorker(config *params.ChainConfig, engine consensus.Engine, eth Backend,
 		pendingTasks:       make(map[common.Hash]*task),
 		txsCh:              make(chan core.NewTxsEvent, txChanSize),
 		chainHeadCh:        make(chan core.ChainHeadEvent, chainHeadChanSize),
+		rChainHeadCh:       make(chan core.ChainHeadEvent, chainHeadChanSize),
 		chainSideCh:        make(chan core.ChainSideEvent, chainSideChanSize),
 		newWorkCh:          make(chan *newWorkReq),
 		taskCh:             make(chan *task),
@@ -218,6 +225,10 @@ func newWorker(config *params.ChainConfig, engine consensus.Engine, eth Backend,
 		startCh:            make(chan struct{}, 1),
 		resubmitIntervalCh: make(chan time.Duration),
 		resubmitAdjustCh:   make(chan *intervalAdjust, resubmitAdjustChanSize),
+		commitments:        commitments,
+		pendingCrossTxs:    pendingCrossTxs,
+		myLatestCommit:     myLatestCommit,
+		commitLock:         commitLock,
 	}
 	if _, ok := engine.(consensus.Istanbul); ok || !config.IsQuorum || config.Clique != nil {
 		// Subscribe NewTxsEvent for tx pool
@@ -225,6 +236,7 @@ func newWorker(config *params.ChainConfig, engine consensus.Engine, eth Backend,
 		// Subscribe events for blockchain
 		worker.chainHeadSub = eth.BlockChain().SubscribeChainHeadEvent(worker.chainHeadCh)
 		worker.chainSideSub = eth.BlockChain().SubscribeChainSideEvent(worker.chainSideCh)
+		worker.rChainHeadSub = eth.RefChain().SubscribeChainHeadEvent(worker.rChainHeadCh)
 
 		// Sanitize recommit interval if the user-specified one is too short.
 		if recommit < minRecommitInterval {
@@ -378,6 +390,12 @@ func (w *worker) newWorkLoop(recommit time.Duration) {
 			timestamp = time.Now().Unix()
 			commit(false, commitInterruptNewHead)
 
+		case head := <-w.rChainHeadCh:
+			block := head.Block
+			w.refNumber = block.Number()
+			w.refHash = block.Hash()
+			log.Info("Updated refernce info", "rn", w.refNumber.Uint64(), "rh", w.refHash)
+
 		case <-timer.C:
 			// If mining is running resubmit a new work cycle periodically to pull in
 			// higher priced transactions. Disable this overhead for pending blocks.
@@ -430,6 +448,7 @@ func (w *worker) mainLoop() {
 	defer w.txsSub.Unsubscribe()
 	defer w.chainHeadSub.Unsubscribe()
 	defer w.chainSideSub.Unsubscribe()
+	defer w.rChainHeadSub.Unsubscribe()
 
 	for {
 		select {
@@ -508,6 +527,8 @@ func (w *worker) mainLoop() {
 		case <-w.txsSub.Err():
 			return
 		case <-w.chainHeadSub.Err():
+			return
+		case <-w.rChainHeadSub.Err():
 			return
 		case <-w.chainSideSub.Err():
 			return
@@ -989,18 +1010,6 @@ func (w *worker) commitTransactions(txs *types.TransactionsByPriceAndNonce, coin
 	return false
 }
 
-func (w *worker) isRef() bool {
-	return w.eth.MyShard() == uint64(0)
-}
-
-func (w *worker) getRefHash() common.Hash {
-	return w.refHash
-}
-
-func (w *worker) getRefNumber() *big.Int {
-	return w.refNumber
-}
-
 // commitNewWork generates several new sealing tasks based on the parent block.
 func (w *worker) commitNewWork(interrupt *int32, noempty bool, timestamp int64) {
 	w.mu.RLock()
@@ -1023,15 +1032,12 @@ func (w *worker) commitNewWork(interrupt *int32, noempty bool, timestamp int64) 
 	header := &types.Header{
 		ParentHash: parent.Hash(),
 		Number:     num.Add(num, common.Big1),
+		RefNumber:  w.refNumber,
+		RefHash:    w.refHash,
 		Shard:      w.eth.MyShard(),
 		GasLimit:   core.CalcGasLimit(parent, w.gasFloor, w.gasCeil),
 		Extra:      w.extra,
 		Time:       big.NewInt(timestamp),
-	}
-
-	if w.eth.MyShard() > uint64(0) {
-		header.RefHash = w.getRefHash()
-		header.RefNumber = w.getRefNumber()
 	}
 
 	// Only set the coinbase if our consensus engine is running (avoid spurious block rewards)

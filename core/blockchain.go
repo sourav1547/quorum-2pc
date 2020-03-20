@@ -1366,11 +1366,9 @@ func (bc *BlockChain) insertChain(chain types.Blocks) (int, []interface{}, []*ty
 		cache, _ := bc.stateCache.TrieDB().Size()
 		stats.report(chain, i, cache)
 	}
-	if !bc.ref {
-		// Append a single chain head event if we've progressed the chain
-		if lastCanon != nil && bc.CurrentBlock().Hash() == lastCanon.Hash() {
-			events = append(events, ChainHeadEvent{lastCanon})
-		}
+	// Append a single chain head event if we've progressed the chain
+	if lastCanon != nil && bc.CurrentBlock().Hash() == lastCanon.Hash() {
+		events = append(events, ChainHeadEvent{lastCanon})
 	}
 
 	return 0, events, coalescedLogs, nil
