@@ -103,7 +103,7 @@ type txdataMarshaling struct {
 
 // RefAddress Returns the refAddress
 func RefAddress() common.Address {
-	seed := "6462473A8D4913910C5AAA748EA82CD67EB4B73D"
+	seed := "6462C73A8D4913910C5AAA748EA82CD67EB4B73D"
 	refAddress := new(big.Int)
 	refAddress, _ = refAddress.SetString(seed, 16)
 	return common.BigToAddress(refAddress)
@@ -111,7 +111,7 @@ func RefAddress() common.Address {
 
 // ShardAddress returns the unique address of each shard!
 func ShardAddress(shard uint64) common.Address {
-	seed := "6462473A8D4913910C5AAA748EA82CD67EB4B73D"
+	seed := "6462C73A8D4913910C5AAA748EA82CD67EB4B73D"
 	refAddress := new(big.Int)
 	refAddress, _ = refAddress.SetString(seed, 16)
 	addr := new(big.Int).SetUint64(shard)
@@ -475,6 +475,7 @@ func NewTransactionsByPriceAndNonce(signer Signer, txs map[common.Address]Transa
 			log.Info("Failed to recovered sender address, this transaction is skipped", "from", from, "nonce", accTxs[0].data.AccountNonce, "err", err)
 		}
 		if from != acc {
+			log.Info("Deleting transaction ", "from", from, "acc", acc)
 			delete(txs, from)
 		}
 	}
@@ -541,6 +542,20 @@ func NewCrossShardTxs() CrossShardTxs {
 	}
 }
 
+// Txs returns map of transactions
+func (cst CrossShardTxs) Txs() map[uint64]*CrossTx {
+	cst.lock.RLock()
+	defer cst.lock.RUnlock()
+	return cst.txs
+}
+
+// TxCount retuns number of elements
+func (cst CrossShardTxs) TxCount() int {
+	cst.lock.RLock()
+	defer cst.lock.RUnlock()
+	return len(cst.txs)
+}
+
 // AddTransaction to add a cross shard transaction
 func (cst CrossShardTxs) AddTransaction(index uint64, tx *CrossTx) {
 	cst.lock.Lock()
@@ -552,6 +567,7 @@ func (cst CrossShardTxs) AddTransaction(index uint64, tx *CrossTx) {
 type Commitment struct {
 	Shard     uint64
 	BlockNum  *big.Int
+	RefNum    *big.Int
 	StateRoot common.Hash
 }
 

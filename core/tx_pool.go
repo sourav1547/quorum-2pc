@@ -873,7 +873,6 @@ func (pool *TxPool) addTx(tx *types.Transaction, local bool) error {
 	defer pool.mu.Unlock()
 
 	// Try to inject the transaction and update any state
-	log.Info("@cs, calling pool.add", "thash", tx.Hash())
 	replace, err := pool.add(tx, local)
 	if err != nil {
 		return err

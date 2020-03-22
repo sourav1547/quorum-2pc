@@ -136,6 +136,7 @@ func NewProtocolManager(config *params.ChainConfig, mode downloader.SyncMode, nu
 		txpool:        txpool,
 		blockchain:    blockchain,
 		refchain:      refchain,
+		refAddress:    refAddress,
 		chainconfig:   config,
 		cousinPeers:   make(map[uint64]*peerSet),
 		shardAddMap:   make(map[uint64]*big.Int),
@@ -1070,7 +1071,7 @@ func (pm *ProtocolManager) BroadcastBlock(block *types.Block, propagate bool) {
 				start += copy(data[start:], block.Hash().Bytes())
 
 				// NewTransaction(txType, nonce, shard, to, amount, gasLimit, gasPrice, data)
-				stateTx := types.NewTransaction(types.StateCommit, block.NumberU64()-1, pm.myshard, pm.refAddress, common.Big0, pm.stateGasLimit, pm.stateGasPrice, data)
+				stateTx := types.NewTransaction(types.StateCommit, block.NumberU64()-1, pm.myshard, pm.refAddress, big.NewInt(0), pm.stateGasLimit, pm.stateGasPrice, data)
 				var txs []*types.Transaction
 				txs = append(txs, stateTx)
 				pm.cousinPeerLock.RLock()
@@ -1089,7 +1090,7 @@ func (pm *ProtocolManager) BroadcastBlock(block *types.Block, propagate bool) {
 				for _, peer := range rTransfer {
 					peer.AsyncSendTransactions(txs)
 				}
-				log.Debug("Propagated state committment", "number", block.Number(), "bh", block.Hash(), "th", stateTx.Hash(), "data", hex.EncodeToString(data))
+				log.Debug("Propagated state committment", "number", block.Number(), "bh", block.Hash(), "th", stateTx.Hash(), "val", stateTx.Value().Uint64(), "data", hex.EncodeToString(data))
 			}
 		}
 		return

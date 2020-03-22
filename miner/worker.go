@@ -119,6 +119,7 @@ const (
 
 // newWorkReq represents a request for new sealing work submitting with relative interrupt notifier.
 type newWorkReq struct {
+	reorg     bool
 	interrupt *int32
 	noempty   bool
 	timestamp int64
@@ -138,15 +139,28 @@ type worker struct {
 	eth    Backend
 	chain  *core.BlockChain
 
+	refHashLock     sync.RWMutex
+	refNumberLock   sync.RWMutex
 	refHash         common.Hash                    // Hash of the last knwon reference block
 	refNumber       *big.Int                       // Last know reference block
 	pendingCrossTxs map[uint64]types.CrossShardTxs // Pending Cross shard transactions
 	commitments     map[uint64]types.Commitments   // Known commitments for each shard
 	myLatestCommit  *types.Commitment              // Latest committed block
 	commitLock      sync.RWMutex                   // Lock to prevent concurrent access
+	crossTxsLock    sync.RWMutex
+
+	pendingResults   map[uint64]*core.ExecResult
+	pendingResultsMu sync.RWMutex
+
+	crossWorkCh     chan struct{}
+	pendingResultCh chan struct{}
+	processing      int32
+	lastProcessed   uint64
+	processingMu    sync.RWMutex
 
 	gasFloor uint64
 	gasCeil  uint64
+	gasLimit uint64
 
 	// Subscriptions
 	mux           *event.TypeMux
@@ -198,14 +212,14 @@ type worker struct {
 	resubmitHook func(time.Duration, time.Duration) // Method to call upon updating resubmitting interval.
 }
 
-func newWorker(config *params.ChainConfig, engine consensus.Engine, eth Backend, mux *event.TypeMux, recommit time.Duration, gasFloor, gasCeil uint64, isLocalBlock func(*types.Block) bool, commitments map[uint64]types.Commitments, pendingCrossTxs map[uint64]types.CrossShardTxs, myLatestCommit *types.Commitment, commitLock sync.RWMutex) *worker {
+func newWorker(config *params.ChainConfig, engine consensus.Engine, eth Backend, mux *event.TypeMux, recommit time.Duration, gasFloor, gasCeil uint64, isLocalBlock func(*types.Block) bool, commitments map[uint64]types.Commitments, pendingCrossTxs map[uint64]types.CrossShardTxs, myLatestCommit *types.Commitment, pendingResults map[uint64]*core.ExecResult, pendingResultsMu, commitLock, crossTxsLock sync.RWMutex) *worker {
 	worker := &worker{
 		config:             config,
 		engine:             engine,
 		eth:                eth,
 		mux:                mux,
 		chain:              eth.BlockChain(),
-		refNumber:          common.Big0,
+		refNumber:          big.NewInt(0),
 		refHash:            eth.BlockChain().GetGenesisHash(),
 		gasFloor:           gasFloor,
 		gasCeil:            gasCeil,
@@ -228,7 +242,12 @@ func newWorker(config *params.ChainConfig, engine consensus.Engine, eth Backend,
 		commitments:        commitments,
 		pendingCrossTxs:    pendingCrossTxs,
 		myLatestCommit:     myLatestCommit,
+		pendingResults:     pendingResults,
+		pendingResultsMu:   pendingResultsMu,
 		commitLock:         commitLock,
+		crossTxsLock:       crossTxsLock,
+		crossWorkCh:        make(chan struct{}),
+		pendingResultCh:    make(chan struct{}),
 	}
 	if _, ok := engine.(consensus.Istanbul); ok || !config.IsQuorum || config.Clique != nil {
 		// Subscribe NewTxsEvent for tx pool
@@ -237,6 +256,9 @@ func newWorker(config *params.ChainConfig, engine consensus.Engine, eth Backend,
 		worker.chainHeadSub = eth.BlockChain().SubscribeChainHeadEvent(worker.chainHeadCh)
 		worker.chainSideSub = eth.BlockChain().SubscribeChainSideEvent(worker.chainSideCh)
 		worker.rChainHeadSub = eth.RefChain().SubscribeChainHeadEvent(worker.rChainHeadCh)
+
+		// Fixing the gas limit for the entire blockchain.
+		worker.gasLimit = core.CalcGasLimit(worker.chain.GetBlockByNumber(uint64(0)), worker.gasFloor, worker.gasCeil)
 
 		// Sanitize recommit interval if the user-specified one is too short.
 		if recommit < minRecommitInterval {
@@ -248,12 +270,63 @@ func newWorker(config *params.ChainConfig, engine consensus.Engine, eth Backend,
 		go worker.newWorkLoop(recommit)
 		go worker.resultLoop()
 		go worker.taskLoop()
+		if worker.eth.MyShard() > uint64(0) {
+			go worker.crossTaskLoop()
+		}
 
 		// Submit first work to initialize pending state.
 		worker.startCh <- struct{}{}
 	}
 
 	return worker
+}
+
+func (w *worker) commitNum() *big.Int {
+	w.commitLock.RLock()
+	defer w.commitLock.RUnlock()
+	return w.myLatestCommit.BlockNum
+}
+
+func (w *worker) commitNumU64() uint64 {
+	w.commitLock.RLock()
+	defer w.commitLock.RUnlock()
+	return w.myLatestCommit.BlockNum.Uint64()
+}
+
+func (w *worker) commitRoot() common.Hash {
+	w.commitLock.RLock()
+	defer w.commitLock.RUnlock()
+	return w.myLatestCommit.StateRoot
+}
+
+func (w *worker) getRefNumber() *big.Int {
+	w.refNumberLock.RLock()
+	defer w.refNumberLock.RUnlock()
+	return w.refNumber
+}
+
+func (w *worker) getRefNumberU64() uint64 {
+	w.refNumberLock.RLock()
+	defer w.refNumberLock.RUnlock()
+	return w.refNumber.Uint64()
+}
+
+func (w *worker) getRefHash() common.Hash {
+	w.refHashLock.RLock()
+	defer w.refHashLock.RUnlock()
+	return w.refHash
+}
+
+func (w *worker) setRefNumber(num *big.Int) {
+	w.refNumberLock.Lock()
+	defer w.refNumberLock.Unlock()
+	w.refNumber = num
+}
+
+func (w *worker) setRefHash(hash common.Hash) {
+	w.refHashLock.Lock()
+	defer w.refHashLock.Unlock()
+	w.refHash = hash
 }
 
 // setEtherbase sets the etherbase used to initialize the block coinbase field.
@@ -334,12 +407,12 @@ func (w *worker) newWorkLoop(recommit time.Duration) {
 	<-timer.C // discard the initial tick
 
 	// commit aborts in-flight transaction execution with given signal and resubmits a new one.
-	commit := func(noempty bool, s int32) {
+	commit := func(noempty bool, reorg bool, s int32) {
 		if interrupt != nil {
 			atomic.StoreInt32(interrupt, s)
 		}
 		interrupt = new(int32)
-		w.newWorkCh <- &newWorkReq{interrupt: interrupt, noempty: noempty, timestamp: timestamp}
+		w.newWorkCh <- &newWorkReq{reorg: reorg, interrupt: interrupt, noempty: noempty, timestamp: timestamp}
 		timer.Reset(recommit)
 		atomic.StoreInt32(&w.newTxs, 0)
 	}
@@ -380,7 +453,7 @@ func (w *worker) newWorkLoop(recommit time.Duration) {
 		case <-w.startCh:
 			clearPending(w.chain.CurrentBlock().NumberU64())
 			timestamp = time.Now().Unix()
-			commit(false, commitInterruptNewHead)
+			commit(false, false, commitInterruptNewHead)
 
 		case head := <-w.chainHeadCh:
 			if h, ok := w.engine.(consensus.Handler); ok {
@@ -388,13 +461,38 @@ func (w *worker) newWorkLoop(recommit time.Duration) {
 			}
 			clearPending(head.Block.NumberU64())
 			timestamp = time.Now().Unix()
-			commit(false, commitInterruptNewHead)
+			commit(false, false, commitInterruptNewHead)
 
 		case head := <-w.rChainHeadCh:
 			block := head.Block
-			w.refNumber = block.Number()
-			w.refHash = block.Hash()
-			log.Info("Updated refernce info", "rn", w.refNumber.Uint64(), "rh", w.refHash)
+			pivot := w.getRefNumberU64()
+			cNum := w.commitNumU64()
+			if cNum > pivot {
+				pivot = cNum
+			}
+			w.setRefNumber(block.Number())
+			w.setRefHash(block.Hash())
+
+			select {
+			case w.crossWorkCh <- struct{}{}:
+			default:
+			}
+
+			reorg := false
+			bNum := block.NumberU64()
+			for cNum <= bNum {
+				w.crossTxsLock.RLock()
+				ctx := w.pendingCrossTxs[cNum]
+				w.crossTxsLock.RUnlock()
+				len := ctx.TxCount()
+				if len > 0 {
+					reorg = true
+					break
+				}
+				cNum++
+			}
+			timestamp = time.Now().Unix()
+			commit(false, reorg, commitInterruptNewHead)
 
 		case <-timer.C:
 			// If mining is running resubmit a new work cycle periodically to pull in
@@ -405,7 +503,7 @@ func (w *worker) newWorkLoop(recommit time.Duration) {
 					timer.Reset(recommit)
 					continue
 				}
-				commit(true, commitInterruptResubmit)
+				commit(true, false, commitInterruptResubmit)
 			}
 
 		case interval := <-w.resubmitIntervalCh:
@@ -453,7 +551,7 @@ func (w *worker) mainLoop() {
 	for {
 		select {
 		case req := <-w.newWorkCh:
-			w.commitNewWork(req.interrupt, req.noempty, req.timestamp)
+			w.commitNewWork(req.reorg, req.interrupt, req.noempty, req.timestamp)
 
 		case ev := <-w.chainSideCh:
 			// Short circuit for duplicate side blocks
@@ -516,7 +614,7 @@ func (w *worker) mainLoop() {
 			} else {
 				// If we're mining, but nothing is being processed, wake on new transactions
 				if w.config.Clique != nil && w.config.Clique.Period == 0 {
-					w.commitNewWork(nil, false, time.Now().Unix())
+					w.commitNewWork(false, nil, false, time.Now().Unix())
 				}
 			}
 			atomic.AddInt32(&w.newTxs, int32(len(ev.Txs)))
@@ -688,20 +786,226 @@ func mergeReceipts(pub, priv types.Receipts) types.Receipts {
 	return ret
 }
 
-// makeCurrent creates a new environment for the current cycle.
-func (w *worker) makeCurrent(parent *types.Block, header *types.Header) error {
-	publicState, privateState, err := w.chain.StateAt(parent.Root())
+// prevTaskLoop is a standalone goroutine to execute contract transactions of previous blocks
+func (w *worker) crossTaskLoop() {
+	for {
+		select {
+		case <-w.crossWorkCh:
+			w.processingMu.Lock()
+			if atomic.LoadInt32(&w.processing) == 0 {
+				atomic.StoreInt32(&w.processing, 1)
+				go w.processCrossTxs()
+			}
+			w.processingMu.Unlock()
+		case <-w.exitCh:
+			return
+		}
+	}
+}
+
+func (w *worker) processCrossTxs() {
+	defer atomic.StoreInt32(&w.processing, 0)
+	var (
+		presult *core.ExecResult
+		result  *core.ExecResult
+		err     error
+	)
+
+	lastWork := atomic.LoadUint64(&w.lastProcessed)
+	nextWork := lastWork + 1
+	refNum := w.getRefNumberU64()
+	for nextWork <= refNum {
+		presult = w.chain.GetPendingResult(lastWork)
+		if presult == nil {
+			log.Error("Parent state missing in cache", "bn", lastWork)
+			return
+		}
+		/**
+		// @sourav, todo: Fix this! Currently we are disabling it.
+		// Wait till the data becomes avaialable at the node.
+		for {
+			if hasData := w.prevData[nextWork]; !hasData {
+				select {
+				case <-w.newDataCh:
+				}
+			} else {
+				break
+			}
+		}
+		*/
+		result, err = w.commitPendingBlock(presult, nextWork)
+		if err != nil {
+			log.Error("Previous transaction execution failed!", "bn", nextWork)
+			return
+		}
+		w.pendingResultsMu.Lock()
+		w.pendingResults[nextWork] = result
+		w.pendingResultsMu.Unlock()
+		atomic.StoreUint64(&w.lastProcessed, nextWork)
+		// Sending a signal that a new result has been added
+		select {
+		case w.pendingResultCh <- struct{}{}:
+		default:
+		}
+		nextWork = nextWork + 1
+		refNum = w.getRefNumberU64()
+	}
+	return
+}
+
+func (w *worker) commitPendingBlock(prevResult *core.ExecResult, work uint64) (*core.ExecResult, error) {
+	root := w.commitRoot()
+	num := w.commitNum()
+	publicState := prevResult.State.Copy()
+	privateState, err := w.chain.PrivateStateAt(root)
 	if err != nil {
-		return err
+		log.Error("Error in fetching private state of parent block!", "bn", num.Uint64())
 	}
 	env := &environment{
-		signer:       types.MakeSigner(w.config, header.Number),
+		signer:       types.MakeSigner(w.config, num),
 		state:        publicState,
-		ancestors:    mapset.NewSet(),
-		family:       mapset.NewSet(),
-		uncles:       mapset.NewSet(),
-		header:       header,
 		privateState: privateState,
+		txs:          prevResult.Txs,
+		receipts:     prevResult.Receipts,
+		tcount:       0,
+		gasPool:      new(core.GasPool).AddGas(w.gasLimit - prevResult.GasUsed),
+	}
+
+	// Temporary header for transaction execution.
+	header := &types.Header{
+		Number:   num.Add(num, common.Big1),
+		GasLimit: w.gasLimit,
+		Extra:    w.extra,
+		Time:     big.NewInt(time.Now().Unix()),
+	}
+
+	w.crossTxsLock.RLock()
+	cTxs := w.pendingCrossTxs[work]
+	w.crossTxsLock.RUnlock()
+	gasUsed := uint64(0)
+	for _, ctx := range cTxs.Txs() {
+		tx := ctx.Tx
+		_, gas, err := w.commitPendingTransaction(tx, header, env)
+		if err != nil {
+			return nil, err
+		}
+		gasUsed += gas
+		env.tcount++
+	}
+	exr := &core.ExecResult{
+		RefNum:    work,
+		Txs:       env.txs,
+		Receipts:  env.receipts,
+		GasUsed:   prevResult.GasUsed + gasUsed,
+		Tcount:    env.tcount,
+		Start:     prevResult.Start + prevResult.Tcount,
+		State:     env.state,
+		CreatedAt: time.Now(),
+	}
+	log.Info("Cross shard executed", "st", env.state.IntermediateRoot(false), "ps", publicState.IntermediateRoot(false))
+	return exr, nil
+}
+
+func (w *worker) commitPendingTransaction(tx *types.Transaction, header *types.Header, env *environment) ([]*types.Log, uint64, error) {
+	snap := env.state.Snapshot()
+	psnap := env.privateState.Snapshot()
+	coinbase := w.coinbase
+	receipt, _, gas, err := core.ApplyTransaction(w.config, w.chain, &coinbase, env.gasPool, env.state, env.privateState, header, tx, &header.GasUsed, vm.Config{})
+	if err != nil {
+		env.state.RevertToSnapshot(snap)
+		env.privateState.RevertToSnapshot(psnap)
+		return nil, uint64(0), err
+	}
+
+	env.txs = append(env.txs, tx)
+	env.receipts = append(env.receipts, receipt)
+	logs := receipt.Logs
+	return logs, gas, nil
+}
+
+/**
+* 1. Checks the latest available results
+* 2. If no previous cross-shard transaction pending.
+* 	2.1 If no new cross-shard transaction, fill the resutls
+*   2.2 Otherwise, intiate handler to download the required states
+* 	2.3 Wait for the signal about completion for one block.
+* 	2.4 On completion, use this data to execute the transaction.
+* 3. Find the latest block till which point the execution is complete.
+* 	3.1 Handler raises a request on every block.
+* 	3.2 We have to maintain a state cache.
+**/
+
+// makeCurrent creates a new environment for the current cycle.
+func (w *worker) makeCurrent(reorg bool, parent *types.Block, header *types.Header) error {
+
+	var (
+		publicState  *state.StateDB
+		privateState *state.StateDB
+		env          *environment
+		err          error
+	)
+	if reorg {
+		tcount := 0
+		parentNum := parent.NumberU64()
+		refNum := w.getRefNumberU64()
+		var result *core.ExecResult
+
+		// Waiting till the transactions related to latest ref block was executed
+		for {
+			if result = w.chain.GetPendingResult(refNum); result != nil {
+				break
+			} else {
+				log.Info("result nil for ", "refNum", refNum)
+				select {
+				case <-w.pendingResultCh:
+					continue
+				}
+			}
+		}
+
+		// @sourav, todo: we can avoid this loop by keeping an extra variable inside the result
+		for i := parentNum; i <= refNum; i++ {
+			result = w.chain.GetPendingResult(i)
+			if result == nil {
+				log.Error("Missing result for", "bn", i)
+				return errors.New("Missing result")
+			}
+			tcount += result.Tcount
+		}
+
+		publicState := result.State
+		privateState, err := w.chain.PrivateStateAt(parent.Root())
+		if err != nil {
+			log.Error("Private state not found", "bn", parentNum, "bh", parent.Root())
+			return err
+		}
+
+		env = &environment{
+			signer:       types.MakeSigner(w.config, header.Number),
+			state:        publicState,
+			ancestors:    mapset.NewSet(),
+			family:       mapset.NewSet(),
+			uncles:       mapset.NewSet(),
+			header:       header,
+			privateState: privateState,
+			receipts:     result.Receipts,
+			txs:          result.Txs,
+			tcount:       tcount,
+		}
+	} else {
+		publicState, privateState, err = w.chain.StateAt(parent.Root())
+		if err != nil {
+			return err
+		}
+		env = &environment{
+			signer:       types.MakeSigner(w.config, header.Number),
+			state:        publicState,
+			ancestors:    mapset.NewSet(),
+			family:       mapset.NewSet(),
+			uncles:       mapset.NewSet(),
+			header:       header,
+			privateState: privateState,
+		}
 	}
 
 	// when 08 is processed ancestors contain 07 (quick block)
@@ -714,7 +1018,6 @@ func (w *worker) makeCurrent(parent *types.Block, header *types.Header) error {
 	}
 
 	// Keep track of transactions which return errors so they can be removed
-	env.tcount = 0
 	w.current = env
 	return nil
 }
@@ -819,7 +1122,7 @@ func (w *worker) commitInitialContract(coinbase common.Address, interrupt *int32
 	var coalescedLogs []*types.Log
 
 	if w.current.gasPool == nil {
-		w.current.gasPool = new(core.GasPool).AddGas(w.current.header.GasLimit)
+		w.current.gasPool = new(core.GasPool).AddGas(w.gasLimit)
 	}
 
 	gasPrice := big.NewInt(0)
@@ -903,7 +1206,7 @@ func (w *worker) commitTransactions(txs *types.TransactionsByPriceAndNonce, coin
 	}
 
 	if w.current.gasPool == nil {
-		w.current.gasPool = new(core.GasPool).AddGas(w.current.header.GasLimit)
+		w.current.gasPool = new(core.GasPool).AddGas(w.gasLimit)
 	}
 
 	var coalescedLogs []*types.Log
@@ -1011,13 +1314,22 @@ func (w *worker) commitTransactions(txs *types.TransactionsByPriceAndNonce, coin
 }
 
 // commitNewWork generates several new sealing tasks based on the parent block.
-func (w *worker) commitNewWork(interrupt *int32, noempty bool, timestamp int64) {
+func (w *worker) commitNewWork(reorg bool, interrupt *int32, noempty bool, timestamp int64) {
 	w.mu.RLock()
 	defer w.mu.RUnlock()
 
-	tstart := time.Now()
-	parent := w.chain.CurrentBlock()
+	var (
+		parent  *types.Block
+		tstart  = time.Now()
+		myshard = w.eth.MyShard()
+	)
+	if myshard > uint64(0) && reorg {
+		parent = w.chain.GetBlockByNumber(w.myLatestCommit.BlockNum.Uint64())
+	} else {
+		parent = w.chain.CurrentBlock()
+	}
 
+	// @sourav, todo: double check whether this timing constraint is needed or not.
 	if parent.Time().Cmp(new(big.Int).SetInt64(timestamp)) >= 0 {
 		timestamp = parent.Time().Int64() + 1
 	}
@@ -1032,10 +1344,10 @@ func (w *worker) commitNewWork(interrupt *int32, noempty bool, timestamp int64) 
 	header := &types.Header{
 		ParentHash: parent.Hash(),
 		Number:     num.Add(num, common.Big1),
-		RefNumber:  w.refNumber,
-		RefHash:    w.refHash,
+		RefNumber:  w.getRefNumber(),
+		RefHash:    w.getRefHash(),
 		Shard:      w.eth.MyShard(),
-		GasLimit:   core.CalcGasLimit(parent, w.gasFloor, w.gasCeil),
+		GasLimit:   w.gasLimit,
 		Extra:      w.extra,
 		Time:       big.NewInt(timestamp),
 	}
@@ -1066,7 +1378,7 @@ func (w *worker) commitNewWork(interrupt *int32, noempty bool, timestamp int64) 
 		}
 	}
 	// Could potentially happen if starting to mine in an odd state.
-	err := w.makeCurrent(parent, header)
+	err := w.makeCurrent(reorg, parent, header)
 	if err != nil {
 		log.Error("Failed to create mining context", "err", err)
 		return
@@ -1102,7 +1414,7 @@ func (w *worker) commitNewWork(interrupt *int32, noempty bool, timestamp int64) 
 	commitUncles(w.remoteUncles)
 
 	// // If the block is first block, then deploy all contracts
-	if header.Number.Cmp(common.Big1) == 0 && w.eth.MyShard() == uint64(0) {
+	if header.Number.Cmp(common.Big1) == 0 {
 		if w.commitInitialContract(w.coinbase, interrupt) {
 			return
 		}

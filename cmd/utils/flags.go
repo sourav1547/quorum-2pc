@@ -1521,8 +1521,11 @@ func MakeChain(ctx *cli.Context, stack *node.Node) (chain *core.BlockChain, chai
 		cache.TrieNodeLimit = ctx.GlobalInt(CacheFlag.Name) * ctx.GlobalInt(CacheGCFlag.Name) / 100
 	}
 	vmcfg := vm.Config{EnablePreimageRecording: ctx.GlobalBool(VMEnableDebugFlag.Name)}
-	var lock sync.RWMutex
-	chain, err = core.NewBlockChain(chainDb, cache, config, engine, vmcfg, nil, false, uint64(0), nil, nil, nil, lock)
+	var (
+		lock   sync.RWMutex
+		prlock sync.RWMutex
+	)
+	chain, err = core.NewBlockChain(chainDb, cache, config, engine, vmcfg, nil, false, uint64(0), nil, nil, nil, nil, prlock, lock)
 	if err != nil {
 		Fatalf("Can't create BlockChain: %v", err)
 	}
