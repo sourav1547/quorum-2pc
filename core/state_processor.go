@@ -24,6 +24,7 @@ import (
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/core/vm"
 	"github.com/ethereum/go-ethereum/crypto"
+	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/params"
 )
 
@@ -73,7 +74,16 @@ func (p *StateProcessor) Process(block *types.Block, statedb, privateState *stat
 		statedb.Prepare(tx.Hash(), block.Hash(), i)
 		privateState.Prepare(tx.Hash(), block.Hash(), i)
 
+		snap := statedb.Snapshot()
+		psnap := privateState.Snapshot()
+
 		receipt, privateReceipt, _, err := ApplyTransaction(p.config, p.bc, nil, gp, statedb, privateState, header, tx, usedGas, cfg)
+		if tx.TxType() == types.CrossShardLocal && err != nil {
+			statedb.RevertToSnapshot(snap)
+			privateState.RevertToSnapshot(psnap)
+			log.Warn("Skipping transaction", "thash", tx.Hash(), "error", err)
+			continue
+		}
 		if err != nil {
 			return nil, nil, nil, 0, err
 		}

@@ -86,16 +86,16 @@ type ExecResult struct {
 	Receipts  []*types.Receipt
 	State     *state.StateDB // Local state after executing cross-shard transaction
 	CreatedAt time.Time
-	Start     int // Describes the start index of the receipts
 	Tcount    int // Total number of receipts in this particular result.
 }
 
 // Reset the result on a commitment
-func (exr *ExecResult) Reset() {
+func (exr *ExecResult) Reset(refNum uint64) {
+	exr.RefNum = refNum
+	exr.State = nil
 	exr.GasUsed = uint64(0)
 	exr.Txs = nil
 	exr.Receipts = nil
-	exr.Start = 0
 	exr.Tcount = 0
 }
 
@@ -129,14 +129,15 @@ type BlockChain struct {
 	triegc *prque.Prque   // Priority queue mapping block numbers to tries to gc
 	gcproc time.Duration  // Accumulates canonical block processing for trie dumping
 
-	hc            *HeaderChain
-	rmLogsFeed    event.Feed
-	chainFeed     event.Feed
-	chainSideFeed event.Feed
-	chainHeadFeed event.Feed
-	logsFeed      event.Feed
-	scope         event.SubscriptionScope
-	genesisBlock  *types.Block
+	hc             *HeaderChain
+	rmLogsFeed     event.Feed
+	chainFeed      event.Feed
+	chainSideFeed  event.Feed
+	chainHeadFeed  event.Feed
+	commitHeadFeed event.Feed
+	logsFeed       event.Feed
+	scope          event.SubscriptionScope
+	genesisBlock   *types.Block
 
 	mu      sync.RWMutex // global mutex for locking chain operations
 	chainmu sync.RWMutex // blockchain insertion lock
@@ -167,8 +168,8 @@ type BlockChain struct {
 	badBlocks      *lru.Cache              // Bad block cache
 	shouldPreserve func(*types.Block) bool // Function used to determine whether should preserve the given block.
 
-	pendingResultsMu sync.RWMutex
-	pendingResults   map[uint64]*ExecResult
+	refCacheMu sync.RWMutex
+	refCache   *ExecResult
 
 	privateStateCache state.Database // Private state database to reuse between imports (contains state cache)
 }
@@ -176,7 +177,7 @@ type BlockChain struct {
 // NewBlockChain returns a fully initialised block chain using information
 // available in the database. It initialises the default Ethereum Validator and
 // Processor.
-func NewBlockChain(db ethdb.Database, cacheConfig *CacheConfig, chainConfig *params.ChainConfig, engine consensus.Engine, vmConfig vm.Config, shouldPreserve func(block *types.Block) bool, ref bool, shard uint64, commitments map[uint64]types.Commitments, pendingCrossTxs map[uint64]types.CrossShardTxs, myLatestCommit *types.Commitment, pendingResults map[uint64]*ExecResult, pendingResultsMu, commitLock sync.RWMutex) (*BlockChain, error) {
+func NewBlockChain(db ethdb.Database, cacheConfig *CacheConfig, chainConfig *params.ChainConfig, engine consensus.Engine, vmConfig vm.Config, shouldPreserve func(block *types.Block) bool, ref bool, shard uint64, commitments map[uint64]types.Commitments, pendingCrossTxs map[uint64]types.CrossShardTxs, myLatestCommit *types.Commitment, refCache *ExecResult, refCacheMu, commitLock sync.RWMutex) (*BlockChain, error) {
 	if cacheConfig == nil {
 		cacheConfig = &CacheConfig{
 			TrieNodeLimit: 256,
@@ -213,7 +214,8 @@ func NewBlockChain(db ethdb.Database, cacheConfig *CacheConfig, chainConfig *par
 		commitments:       commitments,
 		myLatestCommit:    myLatestCommit,
 		commitLock:        commitLock,
-		pendingResults:    pendingResults,
+		refCache:          refCache,
+		refCacheMu:        refCacheMu,
 	}
 	bc.SetValidator(NewBlockValidator(chainConfig, bc, engine))
 	bc.SetProcessor(NewStateProcessor(chainConfig, bc, engine))
@@ -233,16 +235,7 @@ func NewBlockChain(db ethdb.Database, cacheConfig *CacheConfig, chainConfig *par
 		if err != nil {
 			return nil, err
 		}
-		bc.pendingResults[uint64(0)] = &ExecResult{
-			RefNum:    uint64(0),
-			GasUsed:   uint64(0),
-			Txs:       []*types.Transaction{},
-			Receipts:  []*types.Receipt{},
-			State:     genesisState.Copy(),
-			CreatedAt: time.Now(),
-			Tcount:    0,
-			Start:     0,
-		}
+		bc.refCache.State = genesisState.Copy()
 	}
 
 	if err := bc.loadLastState(); err != nil {
@@ -267,13 +260,6 @@ func NewBlockChain(db ethdb.Database, cacheConfig *CacheConfig, chainConfig *par
 	// Take ownership of this particular state
 	go bc.update()
 	return bc, nil
-}
-
-// GetPendingResult results pending result
-func (bc *BlockChain) GetPendingResult(index uint64) *ExecResult {
-	bc.pendingResultsMu.RLock()
-	defer bc.pendingResultsMu.RLock()
-	return bc.pendingResults[index]
 }
 
 // MyShard retuns shard of a blockchain
@@ -1224,6 +1210,7 @@ func (bc *BlockChain) insertChain(chain types.Blocks) (int, []interface{}, []*ty
 		events        = make([]interface{}, 0, len(chain))
 		lastCanon     *types.Block
 		coalescedLogs []*types.Log
+		report        = -1
 	)
 	// Start the parallel header verifier
 	headers := make([]*types.Header, len(chain))
@@ -1409,7 +1396,10 @@ func (bc *BlockChain) insertChain(chain types.Blocks) (int, []interface{}, []*ty
 
 			// Parse transactions in reference chain to check for new state commitments
 			if bc.ref {
-				bc.ParseBlock(block, receipts)
+				curReport := bc.ParseBlock(block, receipts)
+				if curReport > report {
+					report = curReport
+				}
 			}
 
 		case SideStatTy:
@@ -1429,6 +1419,9 @@ func (bc *BlockChain) insertChain(chain types.Blocks) (int, []interface{}, []*ty
 	}
 	// Append a single chain head event if we've progressed the chain
 	if lastCanon != nil && bc.CurrentBlock().Hash() == lastCanon.Hash() {
+		if report != -1 {
+			events = append(events, CommitHeadEvent{uint64(report)})
+		}
 		events = append(events, ChainHeadEvent{lastCanon})
 	}
 
@@ -1436,11 +1429,12 @@ func (bc *BlockChain) insertChain(chain types.Blocks) (int, []interface{}, []*ty
 }
 
 // ParseBlock function extracts necessary information from a reference block
-func (bc *BlockChain) ParseBlock(block *types.Block, receipts types.Receipts) {
+func (bc *BlockChain) ParseBlock(block *types.Block, receipts types.Receipts) int {
 	elemSize := 32
 	u64Offset := 24
 	myshard := bc.MyShard()
 	refNum := block.NumberU64()
+	report := -1
 
 	for i, tx := range block.Transactions() {
 		// Checking execution status of the transaction
@@ -1448,14 +1442,16 @@ func (bc *BlockChain) ParseBlock(block *types.Block, receipts types.Receipts) {
 		rStatus := receipt.Status == uint64(1)
 		txStatus := false
 		var eventOutput uint64
-		if rStatus {
+		if rStatus && receipt.Logs != nil {
 			if tx.TxType() == types.CrossShard || tx.TxType() == types.StateCommit {
 				eventOutput = binary.BigEndian.Uint64(receipt.Logs[0].Data[u64Offset:])
 				txStatus = eventOutput == uint64(1)
 			} else {
-				log.Info("rStatus passed", "txType", tx.TxType())
+				log.Debug("rStatus passed", "txType", tx.TxType())
 				continue
 			}
+		} else {
+			log.Debug("Not parsing transaction", "rs", rStatus, "txType", tx.TxType(), "logs", receipt.Logs)
 		}
 
 		if txStatus {
@@ -1479,42 +1475,44 @@ func (bc *BlockChain) ParseBlock(block *types.Block, receipts types.Receipts) {
 				}
 			} else if tx.TxType() == types.StateCommit {
 				data := tx.Data()[4:]
-				startIndex := 0
-				shard := binary.BigEndian.Uint64(data[startIndex+u64Offset : startIndex+elemSize])
-				startIndex += elemSize
-
-				blockNum := new(big.Int)
-				blockNum.SetBytes(data[startIndex+u64Offset : startIndex+elemSize])
-				startIndex += elemSize
-				commitNum := new(big.Int)
-				commitNum.SetBytes(data[startIndex+u64Offset : startIndex+elemSize])
-				startIndex += elemSize
-				stateRoot := common.BytesToHash(data[startIndex:])
-				commit := &types.Commitment{Shard: shard, BlockNum: blockNum, RefNum: commitNum, StateRoot: stateRoot}
+				var (
+					index     = 0
+					shard     uint64
+					committed uint64
+					refReport uint64
+				)
+				shard = binary.BigEndian.Uint64(data[index+u64Offset : index+elemSize])
+				index += elemSize
+				committed = binary.BigEndian.Uint64(data[index+u64Offset : index+elemSize])
+				index += elemSize
+				refReport = binary.BigEndian.Uint64(data[index+u64Offset : index+elemSize])
+				index += elemSize
+				stateRoot := common.BytesToHash(data[index:])
 				if shard == bc.myshard {
 					bc.commitLock.Lock()
-					bc.myLatestCommit = commit
-					bNum := (*commit.BlockNum).Uint64()
-					cNum := (*commit.RefNum).Uint64()
+					bc.myLatestCommit.Update(committed, refReport, stateRoot)
 					bc.commitLock.Unlock()
-					log.Info("Updated Latest commit", "rn", refNum, "bn", bNum, "cn", cNum)
-					bc.CleanPendingTx(cNum, commit)
+					report = int(refReport)
+					log.Info("Updated Latest commit", "commited", committed, "reported", refReport, "reporting", refNum, "root", stateRoot)
+					bc.CleanPendingTx(refReport)
 				} else {
 					if _, ok := bc.commitments[refNum]; !ok {
 						bc.commitments[refNum] = types.NewCommitments()
 					}
+					commit := &types.Commitment{Shard: shard, BlockNum: committed, RefNum: refReport, StateRoot: stateRoot}
 					bc.commitments[refNum].AddCommit(shard, commit)
-					log.Info("New commit added for ", "shard", shard, "rn", refNum, "bn", (*commit.BlockNum).Uint64())
+					log.Debug("New commit added for ", "shard", shard, "committed", committed, "reporting", refNum, "root", stateRoot)
 				}
 			}
 		} else {
-			log.Info("Unsuccesful transaction execution!", "status", receipt.Status, "event", eventOutput, "txType", tx.TxType(), "hash", tx.Hash())
+			log.Debug("Unsuccesful transaction execution!", "status", receipt.Status, "event", eventOutput, "txType", tx.TxType(), "hash", tx.Hash())
 		}
 	}
+	return report
 }
 
 // CleanPendingTx removes commited cross-shard transactions
-func (bc *BlockChain) CleanPendingTx(blockNum uint64, commit *types.Commitment) {
+func (bc *BlockChain) CleanPendingTx(blockNum uint64) {
 	for num := range bc.commitments {
 		if num < blockNum {
 			if _, ok := bc.commitments[num]; ok {
@@ -1528,21 +1526,10 @@ func (bc *BlockChain) CleanPendingTx(blockNum uint64, commit *types.Commitment) 
 		if num < blockNum {
 			if _, ok := bc.pendingCrossTxs[num]; ok {
 				delete(bc.pendingCrossTxs, num)
-				log.Info("Cleaning cross shard transactions for", "rbn", num)
+				log.Debug("Cleaning cross shard transactions for", "rbn", num)
 			}
 		}
 	}
-
-	bc.pendingResultsMu.Lock()
-	for num := range bc.pendingResults {
-		if num < blockNum {
-			delete(bc.pendingResults, num)
-			log.Info("Cleaning pending state results for", "rbn", num)
-		}
-	}
-	log.Info("Cleaing pending result for", "bn", blockNum)
-	bc.pendingResults[blockNum].Reset()
-	bc.pendingResultsMu.Unlock()
 }
 
 // ParseCrossTxData parsed data
@@ -1594,10 +1581,12 @@ func (bc *BlockChain) ParseCrossTxData(numShard uint16, data []byte) *types.Cros
 	startIndex = startIndex + uint16(8)
 	funcSig := hex.EncodeToString(data[startIndex : startIndex+uint16(4)])
 	startIndex = startIndex + uint16(4)
-	log.Info("Cross shard Transaction information", "from", sender, "to", receiver, "nonce", nonce, "value", value, "function", funcSig, "gl", gasLimit, "gp", gasPrice, "params", hex.EncodeToString(data[startIndex:]))
 	tx := types.NewTransaction(types.CrossShardLocal, uint64(nonce), uint64(0), receiver, big.NewInt(int64(value)), gasLimit, big.NewInt(int64(gasPrice)), data[startIndex:])
-	tx.SetFrom(sender)
-	crossTx.Tx = tx
+
+	crossTx.SetTransaction(tx)
+	crossTx.Tx.SetFrom(types.HomesteadSigner{}, sender)
+
+	log.Info("New Cross shard Transaction", "hash", crossTx.Tx.Hash(), "from", crossTx.Tx.From(), "to", crossTx.Tx.To(), "nonce", crossTx.Tx.Nonce(), "value", crossTx.Tx.Value(), "function", funcSig, "params", hex.EncodeToString(data[startIndex:]))
 	return crossTx
 }
 
@@ -1651,7 +1640,7 @@ func (st *insertStats) report(chain []*types.Block, index int, cache common.Stor
 		context := []interface{}{
 			"blocks", st.processed, "txs", txs, "mgas", float64(st.usedGas) / 1000000,
 			"elapsed", common.PrettyDuration(elapsed), "mgasps", float64(st.usedGas) * 1000 / float64(elapsed),
-			"number", end.Number(), "hash", end.Hash(),
+			"number", end.Number(), "shard", end.Shard(), "hash", end.Hash(),
 		}
 		if timestamp := time.Unix(end.Time().Int64(), 0); time.Since(timestamp) > time.Minute {
 			context = append(context, []interface{}{"age", common.PrettyAge(timestamp)}...)
@@ -1815,6 +1804,9 @@ func (bc *BlockChain) PostChainEvents(events []interface{}, logs []*types.Log) {
 
 		case ChainSideEvent:
 			bc.chainSideFeed.Send(ev)
+
+		case CommitHeadEvent:
+			bc.commitHeadFeed.Send(ev)
 		}
 	}
 }
@@ -2011,6 +2003,11 @@ func (bc *BlockChain) SubscribeChainHeadEvent(ch chan<- ChainHeadEvent) event.Su
 // SubscribeChainSideEvent registers a subscription of ChainSideEvent.
 func (bc *BlockChain) SubscribeChainSideEvent(ch chan<- ChainSideEvent) event.Subscription {
 	return bc.scope.Track(bc.chainSideFeed.Subscribe(ch))
+}
+
+// SubscribeCommitHeadEvent registers a subscription of CommitHeadEvent.
+func (bc *BlockChain) SubscribeCommitHeadEvent(ch chan<- CommitHeadEvent) event.Subscription {
+	return bc.scope.Track(bc.commitHeadFeed.Subscribe(ch))
 }
 
 // SubscribeLogsEvent registers a subscription of []*types.Log.

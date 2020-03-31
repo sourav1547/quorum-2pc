@@ -909,13 +909,17 @@ func (pm *ProtocolManager) handleMsg(p *peer) error {
 			// scenario should easily be covered by the fetcher.
 			if ref {
 				currentBlock := pm.refchain.CurrentBlock()
-				if trueTD.Cmp(pm.refchain.GetTd(currentBlock.Hash(), currentBlock.NumberU64())) > 0 && p.Shard() == uint64(0) {
-					go pm.synchronise(ref, p)
+				if currentBlock != nil {
+					if trueTD.Cmp(pm.refchain.GetTd(currentBlock.Hash(), currentBlock.NumberU64())) > 0 && p.Shard() == uint64(0) {
+						go pm.synchronise(ref, p)
+					}
 				}
 			} else {
 				currentBlock := pm.blockchain.CurrentBlock()
-				if trueTD.Cmp(pm.blockchain.GetTd(currentBlock.Hash(), currentBlock.NumberU64())) > 0 {
-					go pm.synchronise(ref, p)
+				if currentBlock != nil {
+					if trueTD.Cmp(pm.blockchain.GetTd(currentBlock.Hash(), currentBlock.NumberU64())) > 0 {
+						go pm.synchronise(ref, p)
+					}
 				}
 			}
 		}
@@ -1068,7 +1072,7 @@ func (pm *ProtocolManager) BroadcastBlock(block *types.Block, propagate bool) {
 				start += copy(data[start:], shardByte)
 				start += copy(data[start:], blkNumByte)
 				start += copy(data[start:], refBlkNumByte)
-				start += copy(data[start:], block.Hash().Bytes())
+				start += copy(data[start:], block.Root().Bytes())
 
 				// NewTransaction(txType, nonce, shard, to, amount, gasLimit, gasPrice, data)
 				stateTx := types.NewTransaction(types.StateCommit, block.NumberU64()-1, pm.myshard, pm.refAddress, big.NewInt(0), pm.stateGasLimit, pm.stateGasPrice, data)

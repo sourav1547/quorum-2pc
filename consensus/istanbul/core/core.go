@@ -217,7 +217,7 @@ func (c *core) commit() {
 
 // startNewRound starts a new round. if round equals to 0, it means to starts a new sequence
 // @sourav, todo: potential starting point.
-func (c *core) startNewRound(round *big.Int) {
+func (c *core) startNewRound(round *big.Int, reorg bool) {
 	var logger log.Logger
 	if c.current == nil {
 		logger = c.logger.New("old_round", -1, "old_seq", 0)
@@ -230,7 +230,7 @@ func (c *core) startNewRound(round *big.Int) {
 	lastProposal, lastProposer := c.backend.LastProposal()
 	if c.current == nil {
 		logger.Trace("Start to the initial round")
-	} else if lastProposal.Number().Cmp(c.current.Sequence()) >= 0 {
+	} else if (lastProposal.Number().Cmp(c.current.Sequence()) >= 0) || reorg {
 		diff := new(big.Int).Sub(lastProposal.Number(), c.current.Sequence())
 		c.sequenceMeter.Mark(new(big.Int).Add(diff, common.Big1).Int64())
 

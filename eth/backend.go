@@ -24,6 +24,7 @@ import (
 	"runtime"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/ethereum/go-ethereum/accounts"
 	"github.com/ethereum/go-ethereum/common"
@@ -78,8 +79,8 @@ type Ethereum struct {
 	myLatestCommit  *types.Commitment              // Latest committed block
 	commitLock      sync.RWMutex                   // Lock for myLatestCommit
 
-	pendingResults   map[uint64]*core.ExecResult
-	pendingResultsMu sync.RWMutex
+	refCache   *core.ExecResult
+	refCacheMu sync.RWMutex
 
 	// Handlers
 	txPool          *core.TxPool
@@ -199,7 +200,16 @@ func New(ctx *node.ServiceContext, config *Config) (*Ethereum, error) {
 		shardAddMap:     make(map[uint64]*big.Int),
 		pendingCrossTxs: make(map[uint64]types.CrossShardTxs),
 		commitments:     make(map[uint64]types.Commitments),
-		pendingResults:  make(map[uint64]*core.ExecResult),
+	}
+
+	eth.refCache = &core.ExecResult{
+		RefNum:    uint64(0),
+		GasUsed:   uint64(0),
+		Txs:       []*types.Transaction{},
+		Receipts:  []*types.Receipt{},
+		State:     nil,
+		CreatedAt: time.Now(),
+		Tcount:    0,
 	}
 
 	// To initialize address with shard
@@ -217,7 +227,7 @@ func New(ctx *node.ServiceContext, config *Config) (*Ethereum, error) {
 		log.Info("Address created for ", "shard", i, "address", common.BigToAddress(addr))
 	}
 
-	eth.myLatestCommit = &types.Commitment{Shard: config.MyShard, BlockNum: common.Big0} // Latest committed block
+	eth.myLatestCommit = &types.Commitment{Shard: config.MyShard, BlockNum: uint64(0), RefNum: uint64(0)} // Latest committed block
 	// force to set the istanbul etherbase to node key address
 	if chainConfig.Istanbul != nil {
 		eth.etherbase = crypto.PubkeyToAddress(ctx.NodeKey().PublicKey)
@@ -240,8 +250,8 @@ func New(ctx *node.ServiceContext, config *Config) (*Ethereum, error) {
 		}
 		cacheConfig = &core.CacheConfig{Disabled: config.NoPruning, TrieNodeLimit: config.TrieCache, TrieTimeLimit: config.TrieTimeout}
 	)
-	eth.blockchain, err = core.NewBlockChain(chainDb, cacheConfig, eth.chainConfig, eth.engine, vmConfig, eth.shouldPreserve, false, config.MyShard, eth.commitments, eth.pendingCrossTxs, eth.myLatestCommit, eth.pendingResults, eth.pendingResultsMu, eth.commitLock)
-	eth.refchain, rerr = core.NewBlockChain(refDb, cacheConfig, eth.chainConfig, eth.engine, vmConfig, eth.shouldPreserve, true, config.MyShard, eth.commitments, eth.pendingCrossTxs, eth.myLatestCommit, eth.pendingResults, eth.pendingResultsMu, eth.commitLock)
+	eth.blockchain, err = core.NewBlockChain(chainDb, cacheConfig, eth.chainConfig, eth.engine, vmConfig, eth.shouldPreserve, false, config.MyShard, eth.commitments, eth.pendingCrossTxs, eth.myLatestCommit, eth.refCache, eth.refCacheMu, eth.commitLock)
+	eth.refchain, rerr = core.NewBlockChain(refDb, cacheConfig, eth.chainConfig, eth.engine, vmConfig, eth.shouldPreserve, true, config.MyShard, eth.commitments, eth.pendingCrossTxs, eth.myLatestCommit, eth.refCache, eth.refCacheMu, eth.commitLock)
 	if err != nil {
 		return nil, err
 	}
@@ -263,7 +273,7 @@ func New(ctx *node.ServiceContext, config *Config) (*Ethereum, error) {
 		return nil, err
 	}
 
-	eth.miner = miner.New(eth, eth.chainConfig, eth.EventMux(), eth.engine, config.MinerRecommit, config.MinerGasFloor, config.MinerGasCeil, eth.isLocalBlock, eth.commitments, eth.pendingCrossTxs, eth.myLatestCommit, eth.pendingResults, eth.pendingResultsMu, eth.commitLock, eth.crossTxsLock)
+	eth.miner = miner.New(eth, eth.chainConfig, eth.EventMux(), eth.engine, config.MinerRecommit, config.MinerGasFloor, config.MinerGasCeil, eth.isLocalBlock, eth.commitments, eth.pendingCrossTxs, eth.myLatestCommit, eth.refCache, eth.refCacheMu, eth.commitLock, eth.crossTxsLock)
 	eth.miner.SetExtra(makeExtraData(config.MinerExtraData, eth.chainConfig.IsQuorum))
 
 	hexNodeId := fmt.Sprintf("%x", crypto.FromECDSAPub(&ctx.NodeKey().PublicKey)[1:]) // Quorum

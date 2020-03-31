@@ -233,6 +233,7 @@ func (tx *Transaction) UnmarshalJSON(input []byte) error {
 }
 
 func (tx *Transaction) Data() []byte       { return common.CopyBytes(tx.data.Payload) }
+func (tx *Transaction) TxData() txdata     { return tx.data }
 func (tx *Transaction) Gas() uint64        { return tx.data.GasLimit }
 func (tx *Transaction) GasPrice() *big.Int { return new(big.Int).Set(tx.data.Price) }
 func (tx *Transaction) Value() *big.Int    { return new(big.Int).Set(tx.data.Amount) }
@@ -307,8 +308,8 @@ func (tx *Transaction) AsMessage(s Signer) (Message, error) {
 }
 
 // SetFrom stores senders address
-func (tx *Transaction) SetFrom(addr common.Address) {
-	tx.from.Store(sigCache{from: addr})
+func (tx *Transaction) SetFrom(signer Signer, addr common.Address) {
+	tx.from.Store(sigCache{signer: signer, from: addr})
 }
 
 // WithSignature returns a new transaction with the given signature.
@@ -529,6 +530,11 @@ type CrossTx struct {
 	AllContracts map[uint64][]CKeys
 }
 
+// SetTransaction sets the transaction
+func (ctx *CrossTx) SetTransaction(tx *Transaction) {
+	ctx.Tx = &Transaction{data: tx.TxData()}
+}
+
 // CrossShardTxs stores index:txn for any given block
 type CrossShardTxs struct {
 	lock sync.RWMutex
@@ -566,9 +572,16 @@ func (cst CrossShardTxs) AddTransaction(index uint64, tx *CrossTx) {
 // Commitment of a particular shard
 type Commitment struct {
 	Shard     uint64
-	BlockNum  *big.Int
-	RefNum    *big.Int
+	BlockNum  uint64
+	RefNum    uint64
 	StateRoot common.Hash
+}
+
+// Update commitment contents
+func (cmt *Commitment) Update(blockNum, refNum uint64, root common.Hash) {
+	cmt.BlockNum = blockNum
+	cmt.RefNum = refNum
+	cmt.StateRoot = root
 }
 
 // Commitments of all the shards
