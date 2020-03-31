@@ -909,15 +909,17 @@ func (pm *ProtocolManager) handleMsg(p *peer) error {
 			// scenario should easily be covered by the fetcher.
 			if ref {
 				currentBlock := pm.refchain.CurrentBlock()
-				if currentBlock != nil {
-					if trueTD.Cmp(pm.refchain.GetTd(currentBlock.Hash(), currentBlock.NumberU64())) > 0 && p.Shard() == uint64(0) {
+				currTD := pm.refchain.GetTd(currentBlock.Hash(), currentBlock.NumberU64())
+				if currTD != nil {
+					if trueTD.Cmp(currTD) > 0 && p.Shard() == uint64(0) {
 						go pm.synchronise(ref, p)
 					}
 				}
 			} else {
 				currentBlock := pm.blockchain.CurrentBlock()
-				if currentBlock != nil {
-					if trueTD.Cmp(pm.blockchain.GetTd(currentBlock.Hash(), currentBlock.NumberU64())) > 0 {
+				currTD := pm.blockchain.GetTd(currentBlock.Hash(), currentBlock.NumberU64())
+				if currTD != nil {
+					if trueTD.Cmp(currTD) > 0 {
 						go pm.synchronise(ref, p)
 					}
 				}
@@ -1034,7 +1036,12 @@ func (pm *ProtocolManager) BroadcastBlock(block *types.Block, propagate bool) {
 			} else {
 
 				if parent = pm.blockchain.GetBlock(block.ParentHash(), block.NumberU64()-1); parent != nil {
-					td = new(big.Int).Add(block.Difficulty(), pm.blockchain.GetTd(block.ParentHash(), block.NumberU64()-1))
+					parentTd := pm.blockchain.GetTd(block.ParentHash(), block.NumberU64()-1)
+					if parentTd != nil {
+						td = new(big.Int).Add(block.Difficulty(), parentTd)
+					} else {
+						return
+					}
 				} else {
 					log.Error("Propagating dangling block", "number", block.Number(), "hash", hash)
 					return
