@@ -1198,6 +1198,9 @@ func (w *worker) commitInitialContract(coinbase common.Address, interrupt *int32
 		w.current.tcount++
 	}
 
+	if w.eth.MyShard() == uint64(0) && w.current.tcount > 0 {
+		w.chain.SetCommitAddress(w.current.receipts[0].ContractAddress)
+	}
 	if !w.isRunning() && len(coalescedLogs) > 0 {
 		// We don't push the pendingLogsEvent while we are mining. The reason is that
 		// when we are mining, the worker will regenerate a mining block every 3 seconds.

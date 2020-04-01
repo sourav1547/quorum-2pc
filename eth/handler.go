@@ -732,13 +732,14 @@ func (pm *ProtocolManager) handleMsg(p *peer) error {
 			transactions, uncles = pm.fetcher.FilterBodies(p.id, transactions, uncles, time.Now())
 		}
 		if len(transactions) > 0 || len(uncles) > 0 || !filter {
-
-			err := pm.rDownloader.DeliverBodies(p.id, transactions, uncles)
-			if err != nil {
-				log.Debug("Failed to deliver bodies", "err", err)
+			if pm.myshard > uint64(0) {
+				err := pm.rDownloader.DeliverBodies(p.id, transactions, uncles)
+				if err != nil {
+					log.Debug("Failed to deliver bodies", "err", err)
+				}
 			}
 
-			err = pm.downloader.DeliverBodies(p.id, transactions, uncles)
+			err := pm.downloader.DeliverBodies(p.id, transactions, uncles)
 			if err != nil {
 				log.Debug("Failed to deliver bodies", "err", err)
 			}

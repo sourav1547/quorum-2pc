@@ -276,6 +276,11 @@ func (bc *BlockChain) CommitAddress() common.Address {
 	return bc.commitAddress
 }
 
+// SetCommitAddress Sets the commit address of the chain.
+func (bc *BlockChain) SetCommitAddress(addr common.Address) {
+	bc.commitAddress = addr
+}
+
 // loadLastState loads the last known chain state from the database. This method
 // assumes that the chain manager mutex is held.
 func (bc *BlockChain) loadLastState() error {
