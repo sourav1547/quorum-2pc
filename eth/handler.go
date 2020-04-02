@@ -438,7 +438,7 @@ func (pm *ProtocolManager) handle(p *peer) error {
 	// main loop. handle incoming messages.
 	for {
 		if err := pm.handleMsg(p); err != nil {
-			p.Log().Debug("Ethereum message handling failed", "err", err)
+			p.Log().Warn("Ethereum message handling failed", "err", err)
 			return err
 		}
 	}
@@ -644,10 +644,8 @@ func (pm *ProtocolManager) handleMsg(p *peer) error {
 		}
 		// Filter out any explicitly requested headers, deliver the rest to the downloader
 		filter := len(headers) == 1
-		var bshard uint64
 
 		if filter {
-			bshard = (headers[0]).Shard
 			// If it's a potential DAO fork check, validate against the rules
 			if p.forkDrop != nil && pm.chainconfig.DAOForkBlock.Cmp(headers[0].Number) == 0 {
 				// Disable the fork drop timer
@@ -666,20 +664,12 @@ func (pm *ProtocolManager) handleMsg(p *peer) error {
 			headers = pm.fetcher.FilterHeaders(p.id, headers, time.Now())
 		}
 		if len(headers) > 0 || !filter {
-			if len(headers) > 0 {
-				bshard = (headers[0]).Shard
+			if err := pm.rDownloader.DeliverHeaders(p.id, headers); err != nil {
+				log.Debug("Failed to deliver headers", "err", err)
 			}
-			ref := pm.myshard > uint64(0) && bshard == uint64(0)
-			if ref {
-				err := pm.rDownloader.DeliverHeaders(p.id, headers)
-				if err != nil {
-					log.Debug("Failed to deliver headers", "err", err)
-				}
-			} else {
-				err := pm.downloader.DeliverHeaders(p.id, headers)
-				if err != nil {
-					log.Debug("Failed to deliver headers", "err", err)
-				}
+
+			if err := pm.downloader.DeliverHeaders(p.id, headers); err != nil {
+				log.Debug("Failed to deliver headers", "err", err)
 			}
 		}
 
@@ -738,8 +728,7 @@ func (pm *ProtocolManager) handleMsg(p *peer) error {
 					log.Debug("Failed to deliver bodies", "err", err)
 				}
 			}
-
-			err := pm.downloader.DeliverBodies(p.id, transactions, uncles)
+			err = pm.downloader.DeliverBodies(p.id, transactions, uncles)
 			if err != nil {
 				log.Debug("Failed to deliver bodies", "err", err)
 			}

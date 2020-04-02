@@ -93,7 +93,7 @@ func (c *core) handlePreprepare(msg *message, src istanbul.Validator) error {
 				})
 			})
 		} else {
-			logger.Warn("Failed to verify proposal", "err", err, "duration", duration)
+			logger.Warn("Failed to verify proposal", "hash", preprepare.Proposal.Hash(), "number", preprepare.Proposal.Number(), "err", err, "duration", duration)
 			c.sendNextRoundChange()
 		}
 		return err
