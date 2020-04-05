@@ -322,6 +322,16 @@ func (p *peer) AsyncSendNewBlock(ref bool, block *types.Block, td *big.Int) {
 	}
 }
 
+// SendDataRequest sends a data request to remote peer
+func (p *peer) SendDataRequest(refNum, count uint64, root common.Hash, keys []*types.CKeys) error {
+	return p2p.Send(p.rw, GetStateDataMsg, &getStateData{Root: root, RefNum: refNum, Count: count, Keys: keys})
+}
+
+// SendDataResponse sends data
+func (p *peer) SendDataResponse(refNum, count uint64, root common.Hash, vals []*types.KeyVal) error {
+	return p2p.Send(p.rw, StateDataMsg, &stateData{Root: root, RefNum: refNum, Count: count, Vals: vals})
+}
+
 // SendBlockHeaders sends a batch of block headers to the remote peer.
 func (p *peer) SendBlockHeaders(headers []*types.Header) error {
 	return p2p.Send(p.rw, BlockHeadersMsg, headers)
@@ -608,6 +618,21 @@ func (ps *peerSet) PeersWithoutBlock(hash common.Hash) []*peer {
 		if !p.knownBlocks.Contains(hash) {
 			list = append(list, p)
 		}
+	}
+	return list
+}
+
+// PeersWithoutRequest retrieves a list of peers to whom the
+// the data request are not sent yet
+// @sourav, todo: as of now we are returning the entire
+// list of peers, we have to fix this later!
+func (ps *peerSet) PeersWithoutRequest(number uint64) []*peer {
+	ps.lock.RLock()
+	defer ps.lock.RUnlock()
+
+	list := make([]*peer, 0, len(ps.peers))
+	for _, p := range ps.peers {
+		list = append(list, p)
 	}
 	return list
 }

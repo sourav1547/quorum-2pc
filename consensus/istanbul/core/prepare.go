@@ -75,7 +75,7 @@ func (c *core) verifyPrepare(prepare *istanbul.Subject, src istanbul.Validator) 
 
 	sub := c.current.Subject()
 	if !reflect.DeepEqual(prepare, sub) {
-		logger.Warn("Inconsistent subjects between PREPARE and proposal", "expected", sub, "got", prepare)
+		logger.Debug("Inconsistent subjects between PREPARE and proposal", "expected", sub, "got", prepare)
 		return errInconsistentSubject
 	}
 

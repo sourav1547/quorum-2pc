@@ -25,6 +25,7 @@ import (
 	"io"
 	"math/big"
 	mrand "math/rand"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -114,16 +115,19 @@ func (exr *ExecResult) Reset(refNum uint64) {
 // included in the canonical one where as GetBlockByNumber always represents the
 // canonical chain.
 type BlockChain struct {
-	myshard     uint64              // To
+	myshard     uint64
+	numShard    uint64
 	ref         bool                // To indicate a reference chain
 	chainConfig *params.ChainConfig // Chain & network configuration
 	cacheConfig *CacheConfig        // Cache configuration for pruning
 
 	commitAddress   common.Address                 // Address of state commitment transaction
 	pendingCrossTxs map[uint64]types.CrossShardTxs // Pending Cross shard transactions
-	commitments     map[uint64]types.Commitments   // Known commitments for each shard
+	commitments     map[uint64]*types.Commitments  // Known commitments for each shard
+	foreignData     map[uint64]*types.DataCache    // Data of foreign shards
 	myLatestCommit  *types.Commitment              // Latest committed block
 	commitLock      sync.RWMutex                   // Lock to prevent concurrent access
+	foreignDataMu   sync.RWMutex                   // Lock for foreign data
 
 	db     ethdb.Database // Low level persistent database to store final content in
 	triegc *prque.Prque   // Priority queue mapping block numbers to tries to gc
@@ -177,7 +181,7 @@ type BlockChain struct {
 // NewBlockChain returns a fully initialised block chain using information
 // available in the database. It initialises the default Ethereum Validator and
 // Processor.
-func NewBlockChain(db ethdb.Database, cacheConfig *CacheConfig, chainConfig *params.ChainConfig, engine consensus.Engine, vmConfig vm.Config, shouldPreserve func(block *types.Block) bool, ref bool, shard uint64, commitments map[uint64]types.Commitments, pendingCrossTxs map[uint64]types.CrossShardTxs, myLatestCommit *types.Commitment, refCache *ExecResult, refCacheMu, commitLock sync.RWMutex) (*BlockChain, error) {
+func NewBlockChain(db ethdb.Database, cacheConfig *CacheConfig, chainConfig *params.ChainConfig, engine consensus.Engine, vmConfig vm.Config, shouldPreserve func(block *types.Block) bool, ref bool, shard, numShard uint64, commitments map[uint64]*types.Commitments, pendingCrossTxs map[uint64]types.CrossShardTxs, myLatestCommit *types.Commitment, foreignData map[uint64]*types.DataCache, foreignDataMu sync.RWMutex, refCache *ExecResult, refCacheMu, commitLock sync.RWMutex) (*BlockChain, error) {
 	if cacheConfig == nil {
 		cacheConfig = &CacheConfig{
 			TrieNodeLimit: 256,
@@ -193,6 +197,7 @@ func NewBlockChain(db ethdb.Database, cacheConfig *CacheConfig, chainConfig *par
 
 	bc := &BlockChain{
 		myshard:           shard,
+		numShard:          numShard,
 		ref:               ref,
 		chainConfig:       chainConfig,
 		cacheConfig:       cacheConfig,
@@ -212,6 +217,8 @@ func NewBlockChain(db ethdb.Database, cacheConfig *CacheConfig, chainConfig *par
 		privateStateCache: state.NewDatabase(db),
 		pendingCrossTxs:   pendingCrossTxs,
 		commitments:       commitments,
+		foreignData:       foreignData,
+		foreignDataMu:     foreignDataMu,
 		myLatestCommit:    myLatestCommit,
 		commitLock:        commitLock,
 		refCache:          refCache,
@@ -231,11 +238,25 @@ func NewBlockChain(db ethdb.Database, cacheConfig *CacheConfig, chainConfig *par
 	}
 
 	if bc.ref {
-		genesisState, err := state.New(bc.genesisBlock.Root(), bc.stateCache)
+		refNum := uint64(0)
+		genRoot := bc.genesisBlock.Root()
+		genesisState, err := state.New(genRoot, bc.stateCache)
 		if err != nil {
 			return nil, err
 		}
 		bc.refCache.State = genesisState.Copy()
+		bc.foreignData[refNum] = types.NewDataCache(refNum, true)
+
+		bc.commitments[refNum] = types.NewCommitments()
+		for shard := uint64(0); shard < numShard; shard++ {
+			commit := &types.Commitment{
+				Shard:     shard,
+				BlockNum:  uint64(0),
+				RefNum:    uint64(0),
+				StateRoot: genRoot,
+			}
+			bc.commitments[refNum].AddCommit(shard, commit)
+		}
 	}
 
 	if err := bc.loadLastState(); err != nil {
@@ -265,6 +286,11 @@ func NewBlockChain(db ethdb.Database, cacheConfig *CacheConfig, chainConfig *par
 // MyShard retuns shard of a blockchain
 func (bc *BlockChain) MyShard() uint64 {
 	return bc.myshard
+}
+
+// NumShard returns number of shard in the system
+func (bc *BlockChain) NumShard() uint64 {
+	return bc.numShard
 }
 
 func (bc *BlockChain) getProcInterrupt() bool {
@@ -491,6 +517,31 @@ func (bc *BlockChain) StateAt(root common.Hash) (*state.StateDB, *state.StateDB,
 	}
 
 	return publicStateDb, privateStateDb, nil
+}
+
+// StateData returns data at a particular root
+func (bc *BlockChain) StateData(root common.Hash, keys []*types.CKeys) []*types.KeyVal {
+	pstate, err := state.New(root, bc.stateCache)
+	if err != nil {
+		log.Error("Error in fetching state", "error", err)
+		return nil
+	}
+	if pstate == nil {
+		log.Error("State not found at", "root", root)
+		return nil
+	}
+
+	var keyVals []*types.KeyVal
+	for _, keyList := range keys {
+		addr := keyList.Addr
+		keyVal := &types.KeyVal{Addr: addr, Data: []common.Hash{}}
+		for _, key := range keyList.Keys {
+			val := pstate.GetState(addr, common.HexToHash(strconv.FormatUint(key, 10)))
+			keyVal.Data = append(keyVal.Data, val)
+		}
+		keyVals = append(keyVals, keyVal)
+	}
+	return keyVals
 }
 
 // PrivateStateAt returns private state
@@ -1441,6 +1492,11 @@ func (bc *BlockChain) ParseBlock(block *types.Block, receipts types.Receipts) in
 	refNum := block.NumberU64()
 	report := -1
 
+	if _, ok := bc.commitments[refNum]; !ok && refNum > uint64(0) {
+		bc.commitments[refNum] = types.NewCommitments()
+		bc.commitments[refNum].CopyCommits(bc.numShard, bc.commitments[refNum-1])
+	}
+
 	for i, tx := range block.Transactions() {
 		// Checking execution status of the transaction
 		receipt := receipts[i]
@@ -1474,9 +1530,6 @@ func (bc *BlockChain) ParseBlock(block *types.Block, receipts types.Receipts) in
 						bc.pendingCrossTxs[refNum] = types.NewCrossShardTxs()
 					}
 					bc.pendingCrossTxs[refNum].AddTransaction(uint64(i), crossTx)
-
-				} else {
-					log.Debug("Local shard not involved in cross shard transaction", "hash", tx.Hash())
 				}
 			} else if tx.TxType() == types.StateCommit {
 				data := tx.Data()[4:]
@@ -1501,9 +1554,6 @@ func (bc *BlockChain) ParseBlock(block *types.Block, receipts types.Receipts) in
 					log.Info("Updated Latest commit", "commited", committed, "reported", refReport, "reporting", refNum, "root", stateRoot)
 					bc.CleanPendingTx(refReport)
 				} else {
-					if _, ok := bc.commitments[refNum]; !ok {
-						bc.commitments[refNum] = types.NewCommitments()
-					}
 					commit := &types.Commitment{Shard: shard, BlockNum: committed, RefNum: refReport, StateRoot: stateRoot}
 					bc.commitments[refNum].AddCommit(shard, commit)
 					log.Debug("New commit added for ", "shard", shard, "committed", committed, "reporting", refNum, "root", stateRoot)
@@ -1512,6 +1562,15 @@ func (bc *BlockChain) ParseBlock(block *types.Block, receipts types.Receipts) in
 		} else {
 			log.Debug("Unsuccesful transaction execution!", "status", receipt.Status, "event", eventOutput, "txType", tx.TxType(), "hash", tx.Hash())
 		}
+	}
+
+	bc.foreignDataMu.Lock()
+	if _, ok := bc.foreignData[refNum]; !ok {
+		bc.foreignData[refNum] = types.NewDataCache(refNum, false)
+	}
+	bc.foreignDataMu.Unlock()
+	if _, ok := bc.pendingCrossTxs[refNum]; ok {
+		bc.foreignData[refNum].InitKeys(bc.myshard, bc.pendingCrossTxs[refNum], bc.commitments[refNum])
 	}
 	return report
 }

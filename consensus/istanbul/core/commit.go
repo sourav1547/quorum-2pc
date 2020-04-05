@@ -87,7 +87,7 @@ func (c *core) verifyCommit(commit *istanbul.Subject, src istanbul.Validator) er
 
 	sub := c.current.Subject()
 	if !reflect.DeepEqual(commit, sub) {
-		logger.Warn("Inconsistent subjects between commit and proposal", "expected", sub, "got", commit)
+		logger.Debug("Inconsistent subjects between commit and proposal", "expected", sub, "got", commit)
 		return errInconsistentSubject
 	}
 

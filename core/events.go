@@ -35,6 +35,9 @@ type PendingStateEvent struct{}
 // NewMinedBlockEvent is posted when a block has been imported.
 type NewMinedBlockEvent struct{ Block *types.Block }
 
+// NewRefBlockEvent is posted when new reference blocks are added to the chain
+type NewRefBlockEvent struct{ Start, End uint64 }
+
 // RemovedLogsEvent is posted when a reorg happens
 type RemovedLogsEvent struct{ Logs []*types.Log }
 

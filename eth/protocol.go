@@ -56,6 +56,8 @@ const (
 	GetBlockBodiesMsg  = 0x05
 	BlockBodiesMsg     = 0x06
 	NewBlockMsg        = 0x07
+	GetStateDataMsg    = 0x08
+	StateDataMsg       = 0x09
 
 	// Protocol messages belonging to eth/63
 	GetNodeDataMsg = 0x0d
@@ -120,6 +122,22 @@ type statusData struct {
 	CurrentBlock    common.Hash
 	RCurrentBlock   common.Hash
 	GenesisBlock    common.Hash
+}
+
+// getStateData to request data
+type getStateData struct {
+	Root   common.Hash    // Block Has
+	RefNum uint64         // Block number
+	Count  uint64         // Number of contracts
+	Keys   []*types.CKeys // Contract address and data address
+}
+
+// stateData data response
+type stateData struct {
+	Root   common.Hash     // Block Has
+	RefNum uint64          // Block number
+	Count  uint64          // Number of contracts
+	Vals   []*types.KeyVal // Contract address and data address
 }
 
 // newBlockHashesData is the network packet for the block announcements.

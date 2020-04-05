@@ -147,7 +147,7 @@ type worker struct {
 	refHash         common.Hash                    // Hash of the last knwon reference block
 	refNumber       *big.Int                       // Last know reference block
 	pendingCrossTxs map[uint64]types.CrossShardTxs // Pending Cross shard transactions
-	commitments     map[uint64]types.Commitments   // Known commitments for each shard
+	commitments     map[uint64]*types.Commitments  // Known commitments for each shard
 	myLatestCommit  *types.Commitment              // Latest committed block
 	commitLock      sync.RWMutex                   // Lock to prevent concurrent access
 	crossTxsLock    sync.RWMutex
@@ -217,7 +217,7 @@ type worker struct {
 	resubmitHook func(time.Duration, time.Duration) // Method to call upon updating resubmitting interval.
 }
 
-func newWorker(config *params.ChainConfig, engine consensus.Engine, eth Backend, mux *event.TypeMux, recommit time.Duration, gasFloor, gasCeil uint64, isLocalBlock func(*types.Block) bool, commitments map[uint64]types.Commitments, pendingCrossTxs map[uint64]types.CrossShardTxs, myLatestCommit *types.Commitment, refCache *core.ExecResult, refCacheMu, commitLock, crossTxsLock sync.RWMutex) *worker {
+func newWorker(config *params.ChainConfig, engine consensus.Engine, eth Backend, mux *event.TypeMux, recommit time.Duration, gasFloor, gasCeil uint64, isLocalBlock func(*types.Block) bool, commitments map[uint64]*types.Commitments, pendingCrossTxs map[uint64]types.CrossShardTxs, myLatestCommit *types.Commitment, refCache *core.ExecResult, refCacheMu, commitLock, crossTxsLock sync.RWMutex) *worker {
 	worker := &worker{
 		config:             config,
 		engine:             engine,
@@ -482,6 +482,7 @@ func (w *worker) newWorkLoop(recommit time.Duration) {
 
 		case head := <-w.rChainHeadCh:
 			block := head.Block
+			w.mux.Post(core.NewRefBlockEvent{Start: w.getRefNumberU64(), End: block.NumberU64()})
 			w.setRefNumber(block.Number())
 			w.setRefHash(block.Hash())
 

@@ -522,12 +522,22 @@ type CKeys struct {
 	Keys []uint64
 }
 
+func (ck *CKeys) AddKey(key uint64) {
+	ck.Keys = append(ck.Keys, key)
+}
+
+// KeyVal stores both address and data
+type KeyVal struct {
+	Addr common.Address
+	Data []common.Hash
+}
+
 // CrossTx structure type of cross shard transactions
 type CrossTx struct {
 	Shards       []uint64
 	BlockNum     *big.Int
 	Tx           *Transaction
-	AllContracts map[uint64][]CKeys
+	AllContracts map[uint64][]CKeys // shard: list of contracts and addresses
 }
 
 // SetTransaction sets the transaction
@@ -587,21 +597,207 @@ func (cmt *Commitment) Update(blockNum, refNum uint64, root common.Hash) {
 // Commitments of all the shards
 type Commitments struct {
 	lock    sync.RWMutex
-	commits map[uint64]*Commitment
+	commits map[uint64]*Commitment // shard:commitment (if any)
 }
 
 // NewCommitments creates a new commitments
-func NewCommitments() Commitments {
-	return Commitments{
+func NewCommitments() *Commitments {
+	return &Commitments{
 		commits: make(map[uint64]*Commitment),
 	}
 }
 
 // AddCommit adds a commit for some particular shard
-func (cm Commitments) AddCommit(shard uint64, commit *Commitment) {
+func (cm *Commitments) AddCommit(shard uint64, commit *Commitment) {
 	cm.lock.Lock()
+	defer cm.lock.Unlock()
 	cm.commits[shard] = commit
-	cm.lock.Unlock()
+}
+
+// GetCommit returns commitment of a shard
+func (cm *Commitments) GetCommit(shard uint64) *Commitment {
+	cm.lock.RLock()
+	defer cm.lock.RUnlock()
+	return cm.commits[shard]
+}
+
+// CopyCommits accross reference numbers
+func (cm *Commitments) CopyCommits(numShard uint64, commits *Commitments) {
+	cm.lock.Lock()
+	defer cm.lock.Unlock()
+	for shard := uint64(1); shard < numShard; shard++ {
+		commit := commits.GetCommit(shard)
+		cm.commits[shard] = &Commitment{
+			RefNum:    commit.RefNum,
+			StateRoot: commit.StateRoot,
+			BlockNum:  commit.BlockNum,
+			Shard:     shard,
+		}
+	}
+}
+
+// CommitNum fetches commitnumber of shard
+func (cm *Commitments) CommitNum(shard uint64) uint64 {
+	cm.lock.RLock()
+	defer cm.lock.RUnlock()
+	if commit, ok := cm.commits[shard]; ok {
+		return commit.BlockNum
+	}
+	log.Warn("Commitment not found for", "shard", shard)
+	return uint64(0)
+}
+
+// DataCache stores foreign data for one block
+type DataCache struct {
+	dataCacheMu sync.RWMutex
+	refNum      uint64
+	status      bool
+	required    int
+	received    int                                       // overall data avaiability status
+	keyval      map[common.Address]*CKeys                 // list of (k,v) pairs for each contract
+	addrToShard map[common.Address]uint64                 // addr to shard mapping
+	shardStatus map[uint64]bool                           // shard to its status mapping
+	commits     map[uint64]*Commitment                    // Corresponding commit
+	values      map[common.Address]map[uint64]common.Hash // key-value pair per contract
+}
+
+// NewDataCache creates a new datacache
+func NewDataCache(bnum uint64, status bool) *DataCache {
+	return &DataCache{
+		refNum:      bnum,
+		status:      status,
+		required:    0,
+		received:    0,
+		keyval:      make(map[common.Address]*CKeys),
+		addrToShard: make(map[common.Address]uint64),
+		shardStatus: make(map[uint64]bool),
+		commits:     make(map[uint64]*Commitment),
+		values:      make(map[common.Address]map[uint64]common.Hash),
+	}
+}
+
+// Status of particular reference block
+func (dc *DataCache) Status() bool {
+	dc.dataCacheMu.RLock()
+	defer dc.dataCacheMu.RUnlock()
+	return dc.status
+}
+
+// GetRoot retruns commitment of a shard
+func (dc *DataCache) GetRoot(shard uint64) common.Hash {
+	dc.dataCacheMu.RLock()
+	defer dc.dataCacheMu.RUnlock()
+	return dc.commits[shard].StateRoot
+}
+
+// StateRoot of a shard
+func (dc *DataCache) StateRoot(shard uint64) common.Hash {
+	dc.dataCacheMu.RLock()
+	defer dc.dataCacheMu.RUnlock()
+	return dc.commits[shard].StateRoot
+}
+
+func (dc *DataCache) AddrToShard() map[common.Address]uint64 {
+	dc.dataCacheMu.RLock()
+	defer dc.dataCacheMu.RUnlock()
+	return dc.addrToShard
+}
+
+func (dc *DataCache) GetKeys(addr common.Address) *CKeys {
+	dc.dataCacheMu.RLock()
+	defer dc.dataCacheMu.RUnlock()
+	return dc.keyval[addr]
+}
+
+func (dc *DataCache) Shardtatus(shard uint64) bool {
+	dc.dataCacheMu.RLock()
+	defer dc.dataCacheMu.RUnlock()
+	return dc.shardStatus[shard]
+}
+
+func (dc *DataCache) AllShardStatus() map[uint64]bool {
+	dc.dataCacheMu.RLock()
+	defer dc.dataCacheMu.RUnlock()
+	return dc.shardStatus
+}
+
+func (dc *DataCache) SetShardStatus(shard uint64, status bool) {
+	dc.dataCacheMu.Lock()
+	defer dc.dataCacheMu.Unlock()
+	dc.shardStatus[shard] = status
+}
+
+func (dc *DataCache) SetStatus(status bool) {
+	dc.dataCacheMu.Lock()
+	defer dc.dataCacheMu.Unlock()
+	dc.status = status
+}
+
+// AddData adds data corresponding to keys
+func (dc *DataCache) AddData(shard uint64, vals []*KeyVal) {
+	dc.dataCacheMu.Lock()
+	defer dc.dataCacheMu.Unlock()
+	shardStatus := dc.shardStatus[shard]
+	if !shardStatus {
+		for _, values := range vals {
+			caddr := values.Addr
+			data := values.Data
+			lenData := len(data)
+			keys := dc.keyval[caddr].Keys
+			for i := 0; i < lenData; i++ {
+				key := keys[i]
+				val := data[i]
+				dc.values[caddr][key] = val
+			}
+		}
+		dc.shardStatus[shard] = true
+		dc.received++
+		if dc.received == dc.required {
+			dc.status = true
+		}
+	}
+}
+
+// InitKeys adds transaction detail
+func (dc *DataCache) InitKeys(myshard uint64, ctxs CrossShardTxs, commits *Commitments) {
+	var present bool
+	dc.dataCacheMu.Lock()
+	dc.received = 0
+	dc.required = 0
+	transactions := ctxs.Txs()
+	for _, ctx := range transactions {
+		present = false
+		for _, shard := range ctx.Shards {
+			if shard == myshard {
+				present = true
+				break
+			}
+		}
+		if present {
+			for shard, allKeys := range ctx.AllContracts {
+				if shard == myshard {
+					continue
+				}
+				if _, ok := dc.shardStatus[shard]; !ok {
+					dc.required++
+					dc.shardStatus[shard] = false
+					dc.commits[shard] = commits.GetCommit(shard)
+				}
+				for _, contract := range allKeys {
+					caddr := contract.Addr
+					if _, cok := dc.addrToShard[caddr]; !cok {
+						dc.addrToShard[caddr] = shard
+						dc.keyval[caddr] = &CKeys{Addr: caddr}
+						dc.values[caddr] = make(map[uint64]common.Hash)
+					}
+					for _, key := range contract.Keys {
+						dc.keyval[caddr].AddKey(key)
+					}
+				}
+			}
+		}
+	}
+	dc.dataCacheMu.Unlock()
 }
 
 // Message is a fully derived transaction and implements core.Message

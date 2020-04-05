@@ -75,12 +75,15 @@ type Ethereum struct {
 
 	pendingCrossTxs map[uint64]types.CrossShardTxs // Pending Cross shard transactions
 	crossTxsLock    sync.RWMutex                   // Lock for pendingCrossTs
-	commitments     map[uint64]types.Commitments   // Known commitments for each shard
+	commitments     map[uint64]*types.Commitments  // Known commitments for each shard
 	myLatestCommit  *types.Commitment              // Latest committed block
 	commitLock      sync.RWMutex                   // Lock for myLatestCommit
 
 	refCache   *core.ExecResult
 	refCacheMu sync.RWMutex
+
+	foreignData   map[uint64]*types.DataCache
+	foreignDataMu sync.RWMutex
 
 	// Handlers
 	txPool          *core.TxPool
@@ -199,7 +202,8 @@ func New(ctx *node.ServiceContext, config *Config) (*Ethereum, error) {
 		refIndexer:      NewBloomIndexer(refDb, params.BloomBitsBlocks, params.BloomConfirms),
 		shardAddMap:     make(map[uint64]*big.Int),
 		pendingCrossTxs: make(map[uint64]types.CrossShardTxs),
-		commitments:     make(map[uint64]types.Commitments),
+		commitments:     make(map[uint64]*types.Commitments),
+		foreignData:     make(map[uint64]*types.DataCache),
 	}
 
 	eth.refCache = &core.ExecResult{
@@ -250,8 +254,8 @@ func New(ctx *node.ServiceContext, config *Config) (*Ethereum, error) {
 		}
 		cacheConfig = &core.CacheConfig{Disabled: config.NoPruning, TrieNodeLimit: config.TrieCache, TrieTimeLimit: config.TrieTimeout}
 	)
-	eth.blockchain, err = core.NewBlockChain(chainDb, cacheConfig, eth.chainConfig, eth.engine, vmConfig, eth.shouldPreserve, false, config.MyShard, eth.commitments, eth.pendingCrossTxs, eth.myLatestCommit, eth.refCache, eth.refCacheMu, eth.commitLock)
-	eth.refchain, rerr = core.NewBlockChain(refDb, cacheConfig, eth.chainConfig, eth.engine, vmConfig, eth.shouldPreserve, true, config.MyShard, eth.commitments, eth.pendingCrossTxs, eth.myLatestCommit, eth.refCache, eth.refCacheMu, eth.commitLock)
+	eth.blockchain, err = core.NewBlockChain(chainDb, cacheConfig, eth.chainConfig, eth.engine, vmConfig, eth.shouldPreserve, false, config.MyShard, config.NumShard, eth.commitments, eth.pendingCrossTxs, eth.myLatestCommit, eth.foreignData, eth.foreignDataMu, eth.refCache, eth.refCacheMu, eth.commitLock)
+	eth.refchain, rerr = core.NewBlockChain(refDb, cacheConfig, eth.chainConfig, eth.engine, vmConfig, eth.shouldPreserve, true, config.MyShard, config.NumShard, eth.commitments, eth.pendingCrossTxs, eth.myLatestCommit, eth.foreignData, eth.foreignDataMu, eth.refCache, eth.refCacheMu, eth.commitLock)
 	if err != nil {
 		return nil, err
 	}
@@ -269,7 +273,7 @@ func New(ctx *node.ServiceContext, config *Config) (*Ethereum, error) {
 	}
 	eth.txPool = core.NewTxPool(config.TxPool, eth.chainConfig, eth.refAddress, eth.shardAddMap, eth.blockchain)
 
-	if eth.protocolManager, err = NewProtocolManager(eth.chainConfig, config.SyncMode, config.NumShard, config.MyShard, config.NetworkId, eth.eventMux, eth.rEventMux, eth.txPool, eth.engine, eth.blockchain, eth.refchain, eth.refAddress, eth.shardAddMap, chainDb, refDb, config.RaftMode); err != nil {
+	if eth.protocolManager, err = NewProtocolManager(eth.chainConfig, config.SyncMode, config.NumShard, config.MyShard, config.NetworkId, eth.eventMux, eth.rEventMux, eth.txPool, eth.engine, eth.blockchain, eth.refchain, eth.refAddress, eth.shardAddMap, eth.foreignData, eth.foreignDataMu, chainDb, refDb, config.RaftMode); err != nil {
 		return nil, err
 	}
 

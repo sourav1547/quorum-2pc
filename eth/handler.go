@@ -57,6 +57,9 @@ const (
 
 	// minimim number of peers to broadcast new blocks to
 	minBroadcastPeers = 4
+
+	// minimun number of peers to request data
+	minRequestPeers = 2
 )
 
 var (
@@ -97,14 +100,17 @@ type ProtocolManager struct {
 	shardAddMap     map[uint64]*big.Int
 	shardAddMapLock sync.RWMutex
 
+	foreignData   map[uint64]*types.DataCache
+	foreignDataMu sync.RWMutex
+
 	SubProtocols []p2p.Protocol
 
-	eventMux       *event.TypeMux
-	rEventMux      *event.TypeMux
-	txsCh          chan core.NewTxsEvent
-	txsSub         event.Subscription
-	minedBlockSub  *event.TypeMuxSubscription
-	rMinedBlockSub *event.TypeMuxSubscription
+	eventMux      *event.TypeMux
+	rEventMux     *event.TypeMux
+	txsCh         chan core.NewTxsEvent
+	txsSub        event.Subscription
+	minedBlockSub *event.TypeMuxSubscription
+	refBlockSub   *event.TypeMuxSubscription
 
 	// channels for fetcher, syncer, txsyncLoop
 	newPeerCh   chan *peer
@@ -123,7 +129,7 @@ type ProtocolManager struct {
 
 // NewProtocolManager returns a new Ethereum sub protocol manager. The Ethereum sub protocol manages peers capable
 // with the Ethereum network.
-func NewProtocolManager(config *params.ChainConfig, mode downloader.SyncMode, numShard, myshard, networkID uint64, mux, rmux *event.TypeMux, txpool txPool, engine consensus.Engine, blockchain, refchain *core.BlockChain, refAddress common.Address, shardAddMap map[uint64]*big.Int, chaindb, refdb ethdb.Database, raftMode bool) (*ProtocolManager, error) {
+func NewProtocolManager(config *params.ChainConfig, mode downloader.SyncMode, numShard, myshard, networkID uint64, mux, rmux *event.TypeMux, txpool txPool, engine consensus.Engine, blockchain, refchain *core.BlockChain, refAddress common.Address, shardAddMap map[uint64]*big.Int, foreignData map[uint64]*types.DataCache, foreignDataMu sync.RWMutex, chaindb, refdb ethdb.Database, raftMode bool) (*ProtocolManager, error) {
 	// Create the protocol manager with the base fields
 	manager := &ProtocolManager{
 		numShard:      numShard,
@@ -140,6 +146,8 @@ func NewProtocolManager(config *params.ChainConfig, mode downloader.SyncMode, nu
 		chainconfig:   config,
 		cousinPeers:   make(map[uint64]*peerSet),
 		shardAddMap:   make(map[uint64]*big.Int),
+		foreignData:   foreignData,
+		foreignDataMu: foreignDataMu,
 		newPeerCh:     make(chan *peer),
 		noMorePeers:   make(chan struct{}),
 		txsyncCh:      make(chan *txsync),
@@ -304,7 +312,9 @@ func (pm *ProtocolManager) Start(maxPeers int) {
 	if !pm.raftMode {
 		// broadcast mined blocks
 		pm.minedBlockSub = pm.eventMux.Subscribe(core.NewMinedBlockEvent{})
+		pm.refBlockSub = pm.eventMux.Subscribe(core.NewRefBlockEvent{})
 		go pm.minedBroadcastLoop()
+		go pm.fetchForeignDataLoop()
 	} else {
 		// We set this immediately in raft mode to make sure the miner never drops
 		// incoming txes. Raft mode doesn't use the fetcher or downloader, and so
@@ -935,6 +945,34 @@ func (pm *ProtocolManager) handleMsg(p *peer) error {
 		}
 		pm.txpool.AddRemotes(txs)
 
+	case msg.Code == GetStateDataMsg:
+		var request getStateData
+		if err := msg.Decode(&request); err != nil {
+			return errResp(ErrDecode, "%v: %v", msg, err)
+		}
+		refNum := request.RefNum
+		root := request.Root
+		count := request.Count
+		results := pm.blockchain.StateData(root, request.Keys)
+		log.Debug("Received request from", "pshard", p.Shard(), "num", refNum, "root", root)
+
+		err := p.SendDataResponse(refNum, count, root, results)
+		if err != nil {
+			log.Error("Error in send state data response!", "error", err)
+		}
+
+	case msg.Code == StateDataMsg:
+		var request stateData
+		if err := msg.Decode(&request); err != nil {
+			return errResp(ErrDecode, "%v: %v", msg, err)
+		}
+		refNum := request.RefNum
+		root := request.Root
+		vals := request.Vals
+		log.Debug("Received response from", "pshard", p.Shard(), "num", refNum, "root", root)
+
+		go pm.AddFetchedData(refNum, p.Shard(), vals)
+
 	default:
 		return errResp(ErrInvalidMsgCode, "%v", msg.Code)
 	}
@@ -943,6 +981,71 @@ func (pm *ProtocolManager) handleMsg(p *peer) error {
 
 func (pm *ProtocolManager) Enqueue(id string, block *types.Block) {
 	pm.fetcher.Enqueue(id, block)
+}
+
+// AddFetchedData fills the data cache with data downloaded from peer
+func (pm *ProtocolManager) AddFetchedData(refNum, pshard uint64, vals []*types.KeyVal) {
+	pm.foreignDataMu.RLock()
+	dc := pm.foreignData[refNum]
+	pm.foreignDataMu.RUnlock()
+	if dc != nil {
+		dc.AddData(pshard, vals)
+		log.Info("Data added for", "refnum", refNum, "shard", pshard)
+	}
+}
+
+// FetchData requests data from appropriate shard
+func (pm *ProtocolManager) FetchData(start, end uint64) {
+	pm.foreignDataMu.RLock()
+	defer pm.foreignDataMu.RUnlock()
+	for refNum := start; refNum <= end; refNum++ {
+		dc := pm.foreignData[refNum]
+		if !dc.Status() {
+			for shard := range dc.AllShardStatus() {
+				if shard == pm.myshard {
+					continue
+				}
+				root := dc.GetRoot(shard)
+				go pm.FetchDataShard(refNum, shard, root)
+			}
+		} else {
+			log.Debug("No foreign data required for", "number", refNum)
+		}
+	}
+}
+
+// FetchDataShard sends request for each data
+func (pm *ProtocolManager) FetchDataShard(refNum, shard uint64, root common.Hash) {
+	dc := pm.foreignData[refNum]
+	var (
+		keys  []*types.CKeys
+		count uint64
+	)
+	for addr, lshard := range dc.AddrToShard() {
+		if lshard == shard {
+			keys = append(keys, dc.GetKeys(addr))
+			count++
+		}
+	}
+
+	pm.cousinPeerLock.RLock()
+	peers := pm.cousinPeers[shard].PeersWithoutRequest(refNum)
+	pm.cousinPeerLock.RUnlock()
+	// Send the data request to a sqrt(N) nodes, where N is the number of nodes
+	// connected for the shard
+	requestLen := int(math.Sqrt(float64(len(peers))))
+	if requestLen < minRequestPeers {
+		requestLen = minRequestPeers
+	}
+
+	if requestLen > len(peers) {
+		requestLen = len(peers)
+	}
+	requests := peers[:uint64(requestLen)]
+	for _, peer := range requests {
+		peer.SendDataRequest(refNum, count, root, keys)
+	}
+	return
 }
 
 // BroadcastBlock will either propagate a block to a subset of it's peers, or
@@ -1191,6 +1294,14 @@ func (pm *ProtocolManager) minedBroadcastLoop() {
 		if ev, ok := obj.Data.(core.NewMinedBlockEvent); ok {
 			pm.BroadcastBlock(ev.Block, true)  // First propagate block to peers
 			pm.BroadcastBlock(ev.Block, false) // Only then announce to the rest
+		}
+	}
+}
+
+func (pm *ProtocolManager) fetchForeignDataLoop() {
+	for obj := range pm.refBlockSub.Chan() {
+		if ev, ok := obj.Data.(core.NewRefBlockEvent); ok {
+			pm.FetchData(ev.Start, ev.End)
 		}
 	}
 }
