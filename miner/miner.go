@@ -58,13 +58,13 @@ type Miner struct {
 }
 
 // New creates a new miner
-func New(eth Backend, config *params.ChainConfig, mux *event.TypeMux, engine consensus.Engine, recommit time.Duration, gasFloor, gasCeil uint64, isLocalBlock func(block *types.Block) bool, commitments map[uint64]*types.Commitments, pendingCrossTxs map[uint64]types.CrossShardTxs, myLatestCommit *types.Commitment, refCache *core.ExecResult, refCacheMu, commitLock, crossTxsLock sync.RWMutex) *Miner {
+func New(eth Backend, config *params.ChainConfig, mux *event.TypeMux, engine consensus.Engine, recommit time.Duration, gasFloor, gasCeil uint64, isLocalBlock func(block *types.Block) bool, commitments map[uint64]*types.Commitments, pendingCrossTxs map[uint64]types.CrossShardTxs, myLatestCommit *types.Commitment, foreignData map[uint64]*types.DataCache, foreignDataMu sync.RWMutex, refCache *core.ExecResult, refCacheMu, commitLock, crossTxsLock sync.RWMutex) *Miner {
 	miner := &Miner{
 		eth:      eth,
 		mux:      mux,
 		engine:   engine,
 		exitCh:   make(chan struct{}),
-		worker:   newWorker(config, engine, eth, mux, recommit, gasFloor, gasCeil, isLocalBlock, commitments, pendingCrossTxs, myLatestCommit, refCache, refCacheMu, commitLock, crossTxsLock),
+		worker:   newWorker(config, engine, eth, mux, recommit, gasFloor, gasCeil, isLocalBlock, commitments, pendingCrossTxs, myLatestCommit, foreignData, foreignDataMu, refCache, refCacheMu, commitLock, crossTxsLock),
 		canStart: 1,
 	}
 	go miner.update()

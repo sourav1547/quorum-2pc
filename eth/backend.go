@@ -277,7 +277,7 @@ func New(ctx *node.ServiceContext, config *Config) (*Ethereum, error) {
 		return nil, err
 	}
 
-	eth.miner = miner.New(eth, eth.chainConfig, eth.EventMux(), eth.engine, config.MinerRecommit, config.MinerGasFloor, config.MinerGasCeil, eth.isLocalBlock, eth.commitments, eth.pendingCrossTxs, eth.myLatestCommit, eth.refCache, eth.refCacheMu, eth.commitLock, eth.crossTxsLock)
+	eth.miner = miner.New(eth, eth.chainConfig, eth.EventMux(), eth.engine, config.MinerRecommit, config.MinerGasFloor, config.MinerGasCeil, eth.isLocalBlock, eth.commitments, eth.pendingCrossTxs, eth.myLatestCommit, eth.foreignData, eth.foreignDataMu, eth.refCache, eth.refCacheMu, eth.commitLock, eth.crossTxsLock)
 	eth.miner.SetExtra(makeExtraData(config.MinerExtraData, eth.chainConfig.IsQuorum))
 
 	hexNodeId := fmt.Sprintf("%x", crypto.FromECDSAPub(&ctx.NodeKey().PublicKey)[1:]) // Quorum

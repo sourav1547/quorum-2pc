@@ -709,7 +709,7 @@ func (dc *DataCache) GetKeys(addr common.Address) *CKeys {
 	return dc.keyval[addr]
 }
 
-func (dc *DataCache) Shardtatus(shard uint64) bool {
+func (dc *DataCache) ShardStatus(shard uint64) bool {
 	dc.dataCacheMu.RLock()
 	defer dc.dataCacheMu.RUnlock()
 	return dc.shardStatus[shard]

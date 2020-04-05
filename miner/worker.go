@@ -155,6 +155,11 @@ type worker struct {
 	refCache   *core.ExecResult
 	refCacheMu sync.RWMutex
 
+	foreignData   map[uint64]*types.DataCache
+	foreignDataMu sync.RWMutex
+
+	foreignDataCh   chan core.ForeignDataEvent
+	foreignDataSub  event.Subscription
 	crossWorkCh     chan struct{}
 	pendingResultCh chan struct{}
 	stopProcessCh   chan struct{}
@@ -217,7 +222,7 @@ type worker struct {
 	resubmitHook func(time.Duration, time.Duration) // Method to call upon updating resubmitting interval.
 }
 
-func newWorker(config *params.ChainConfig, engine consensus.Engine, eth Backend, mux *event.TypeMux, recommit time.Duration, gasFloor, gasCeil uint64, isLocalBlock func(*types.Block) bool, commitments map[uint64]*types.Commitments, pendingCrossTxs map[uint64]types.CrossShardTxs, myLatestCommit *types.Commitment, refCache *core.ExecResult, refCacheMu, commitLock, crossTxsLock sync.RWMutex) *worker {
+func newWorker(config *params.ChainConfig, engine consensus.Engine, eth Backend, mux *event.TypeMux, recommit time.Duration, gasFloor, gasCeil uint64, isLocalBlock func(*types.Block) bool, commitments map[uint64]*types.Commitments, pendingCrossTxs map[uint64]types.CrossShardTxs, myLatestCommit *types.Commitment, foreignData map[uint64]*types.DataCache, foreignDataMu sync.RWMutex, refCache *core.ExecResult, refCacheMu, commitLock, crossTxsLock sync.RWMutex) *worker {
 	worker := &worker{
 		config:             config,
 		engine:             engine,
@@ -250,6 +255,9 @@ func newWorker(config *params.ChainConfig, engine consensus.Engine, eth Backend,
 		myLatestCommit:     myLatestCommit,
 		refCache:           refCache,
 		refCacheMu:         refCacheMu,
+		foreignData:        foreignData,
+		foreignDataMu:      foreignDataMu,
+		foreignDataCh:      make(chan core.ForeignDataEvent),
 		commitLock:         commitLock,
 		crossTxsLock:       crossTxsLock,
 		crossWorkCh:        make(chan struct{}),
@@ -264,6 +272,7 @@ func newWorker(config *params.ChainConfig, engine consensus.Engine, eth Backend,
 		worker.chainSideSub = eth.BlockChain().SubscribeChainSideEvent(worker.chainSideCh)
 		worker.rChainHeadSub = eth.RefChain().SubscribeChainHeadEvent(worker.rChainHeadCh)
 		worker.commitHeadSub = eth.RefChain().SubscribeCommitHeadEvent(worker.commitHeadCh)
+		worker.foreignDataSub = eth.BlockChain().SubscribeForeignDataEvent(worker.foreignDataCh)
 
 		// Fixing the gas limit for the entire blockchain.
 		worker.gasLimit = core.CalcGasLimit(worker.chain.GetBlockByNumber(uint64(0)), worker.gasFloor, worker.gasCeil)
@@ -585,6 +594,7 @@ func (w *worker) mainLoop() {
 	defer w.chainSideSub.Unsubscribe()
 	defer w.rChainHeadSub.Unsubscribe()
 	defer w.commitHeadSub.Unsubscribe()
+	defer w.foreignDataSub.Unsubscribe()
 
 	for {
 		select {
@@ -862,17 +872,29 @@ func (w *worker) processCrossTxs() {
 
 	refNum := w.getRefNumberU64()
 	for current <= refNum {
-		err := w.commitPendingBlock(current)
-		if err == nil {
+		w.foreignDataMu.RLock()
+		dc := w.foreignData[current]
+		w.foreignDataMu.RUnlock()
+		if !dc.Status() {
 			select {
-			case w.pendingResultCh <- struct{}{}:
-			case w.stopProcessCh <- struct{}{}:
+			case <-w.foreignDataCh:
+				refNum = w.getRefNumberU64()
+			case <-w.stopProcessCh:
 				return
-			default:
 			}
+		} else {
+			err := w.commitPendingBlock(current)
+			if err == nil {
+				select {
+				case w.pendingResultCh <- struct{}{}:
+				case <-w.stopProcessCh:
+					return
+				default:
+				}
+			}
+			current = current + 1
+			refNum = w.getRefNumberU64()
 		}
-		current = current + 1
-		refNum = w.getRefNumberU64()
 	}
 	return
 }

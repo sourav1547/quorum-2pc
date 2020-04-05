@@ -38,6 +38,9 @@ type NewMinedBlockEvent struct{ Block *types.Block }
 // NewRefBlockEvent is posted when new reference blocks are added to the chain
 type NewRefBlockEvent struct{ Start, End uint64 }
 
+// ForeignDataEvent is posted when data download is complete
+type ForeignDataEvent struct{}
+
 // RemovedLogsEvent is posted when a reorg happens
 type RemovedLogsEvent struct{ Logs []*types.Log }
 

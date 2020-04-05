@@ -989,8 +989,13 @@ func (pm *ProtocolManager) AddFetchedData(refNum, pshard uint64, vals []*types.K
 	dc := pm.foreignData[refNum]
 	pm.foreignDataMu.RUnlock()
 	if dc != nil {
-		dc.AddData(pshard, vals)
-		log.Info("Data added for", "refnum", refNum, "shard", pshard)
+		if !dc.ShardStatus(pshard) {
+			dc.AddData(pshard, vals)
+			log.Debug("Foreign Data added", "refnum", refNum, "shard", pshard, "status", dc.Status())
+			if dc.Status() {
+				go pm.blockchain.PostForeignDataEvent()
+			}
+		}
 	}
 }
 
