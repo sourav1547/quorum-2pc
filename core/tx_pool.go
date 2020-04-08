@@ -123,7 +123,7 @@ type blockChain interface {
 	CurrentBlock() *types.Block
 	GetBlock(hash common.Hash, number uint64) *types.Block
 	StateAt(root common.Hash) (*state.StateDB, *state.StateDB, error)
-
+	GetBlockByNumber(uint64) *types.Block
 	SubscribeChainHeadEvent(ch chan<- ChainHeadEvent) event.Subscription
 }
 
@@ -358,6 +358,15 @@ func (pool *TxPool) loop() {
 			}
 		}
 	}
+}
+
+// ResetHead changes the transaction pool due to reorganization
+func (pool *TxPool) ResetHead(resetNum uint64) {
+	pool.mu.Lock()
+	defer pool.mu.Unlock()
+	poolHead := pool.chain.CurrentBlock()
+	resetHead := pool.chain.GetBlockByNumber(resetNum)
+	pool.reset(poolHead.Header(), resetHead.Header())
 }
 
 // lockedReset is a wrapper around reset to allow calling it in a thread safe

@@ -528,6 +528,7 @@ func (w *worker) newWorkLoop(recommit time.Duration) {
 				timestamp = time.Now().Unix()
 				if reorg {
 					if parentNum > commitNum {
+						w.eth.TxPool().ResetHead(commitNum)
 						w.chain.SetHead(commitNum)
 						if h, ok := w.engine.(consensus.Handler); ok {
 							h.NewChainHead(true)
