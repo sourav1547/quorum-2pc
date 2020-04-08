@@ -163,7 +163,7 @@ func (b *EthAPIBackend) GetEVM(ctx context.Context, msg core.Message, state vm.M
 		privateState = statedb.state
 	}
 
-	return vm.NewEVM(context, statedb.state, privateState, b.eth.chainConfig, vmCfg), vmError, nil
+	return vm.NewEVM(context, nil, statedb.state, privateState, b.eth.chainConfig, vmCfg), vmError, nil
 }
 
 func (b *EthAPIBackend) SubscribeRemovedLogsEvent(ch chan<- core.RemovedLogsEvent) event.Subscription {

@@ -25,6 +25,7 @@ import (
 	"github.com/ethereum/go-ethereum/common/math"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto/sha3"
+	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/params"
 )
 
@@ -413,7 +414,12 @@ func opBalance(pc *uint64, interpreter *EVMInterpreter, contract *Contract, memo
 	slot := stack.peek()
 	addr := common.BigToAddress(slot)
 	// Quorum: get public/private state db based on addr
-	balance := getDualState(interpreter.evm, addr).GetBalance(addr)
+	// balance := getDualState(interpreter.evm, addr).GetBalance(addr)
+	balance, err := getBalance(interpreter.evm, addr)
+	if err != nil {
+		log.Info("@ds Error in opBalance", "err", err)
+		return nil, err
+	}
 	slot.Set(balance)
 	return nil, nil
 }
@@ -635,7 +641,12 @@ func opMstore8(pc *uint64, interpreter *EVMInterpreter, contract *Contract, memo
 func opSload(pc *uint64, interpreter *EVMInterpreter, contract *Contract, memory *Memory, stack *Stack) ([]byte, error) {
 	loc := stack.peek()
 	// Quorum: get public/private state db based on addr
-	val := getDualState(interpreter.evm, contract.Address()).GetState(contract.Address(), common.BigToHash(loc))
+	// val := getDualState(interpreter.evm, contract.Address()).GetState(contract.Address(), common.BigToHash(loc))
+	val, err := getStateAt(interpreter.evm, contract.Address(), common.BigToHash(loc))
+	if err != nil {
+		log.Info("@ds Error in opsload", "err", err)
+		return nil, err
+	}
 	loc.SetBytes(val.Bytes())
 	return nil, nil
 }
@@ -644,8 +655,12 @@ func opSstore(pc *uint64, interpreter *EVMInterpreter, contract *Contract, memor
 	loc := common.BigToHash(stack.pop())
 	val := stack.pop()
 	// Quorum: get public/private state db based on addr
-	getDualState(interpreter.evm, contract.Address()).SetState(contract.Address(), loc, common.BigToHash(val))
-
+	// getDualState(interpreter.evm, contract.Address()).SetState(contract.Address(), loc, common.BigToHash(val))
+	err := setState(interpreter.evm, contract.Address(), loc, common.BigToHash(val))
+	if err != nil {
+		log.Info("@ds Error in opsstore", "err", err)
+		return nil, err
+	}
 	interpreter.intPool.put(val)
 	return nil, nil
 }

@@ -519,17 +519,26 @@ func (t *TransactionsByPriceAndNonce) Pop() {
 // CKeys implement keys involved in a cross-shard transaction
 type CKeys struct {
 	Addr common.Address
-	Keys []uint64
+	Keys []common.Hash
 }
 
-func (ck *CKeys) AddKey(key uint64) {
+func (ck *CKeys) AddKey(key common.Hash) {
 	ck.Keys = append(ck.Keys, key)
 }
 
 // KeyVal stores both address and data
 type KeyVal struct {
-	Addr common.Address
-	Data []common.Hash
+	Addr    common.Address
+	Balance uint64
+	Nonce   uint64
+	Data    []common.Hash
+}
+
+type CData struct {
+	Addr    common.Address
+	Balance uint64
+	Nonce   uint64
+	Data    map[common.Hash]common.Hash
 }
 
 // CrossTx structure type of cross shard transactions
@@ -547,36 +556,29 @@ func (ctx *CrossTx) SetTransaction(tx *Transaction) {
 
 // CrossShardTxs stores index:txn for any given block
 type CrossShardTxs struct {
-	lock sync.RWMutex
-	txs  map[uint64]*CrossTx // index:transaction
+	Lock sync.RWMutex
+	Txs  map[uint64]*CrossTx // index:transaction
 }
 
 // NewCrossShardTxs for some block number
 func NewCrossShardTxs() CrossShardTxs {
 	return CrossShardTxs{
-		txs: make(map[uint64]*CrossTx),
+		Txs: make(map[uint64]*CrossTx),
 	}
-}
-
-// Txs returns map of transactions
-func (cst CrossShardTxs) Txs() map[uint64]*CrossTx {
-	cst.lock.RLock()
-	defer cst.lock.RUnlock()
-	return cst.txs
 }
 
 // TxCount retuns number of elements
 func (cst CrossShardTxs) TxCount() int {
-	cst.lock.RLock()
-	defer cst.lock.RUnlock()
-	return len(cst.txs)
+	cst.Lock.RLock()
+	defer cst.Lock.RUnlock()
+	return len(cst.Txs)
 }
 
 // AddTransaction to add a cross shard transaction
 func (cst CrossShardTxs) AddTransaction(index uint64, tx *CrossTx) {
-	cst.lock.Lock()
-	cst.txs[index] = tx
-	cst.lock.Unlock()
+	cst.Lock.Lock()
+	cst.Txs[index] = tx
+	cst.Lock.Unlock()
 }
 
 // Commitment of a particular shard
@@ -596,38 +598,38 @@ func (cmt *Commitment) Update(blockNum, refNum uint64, root common.Hash) {
 
 // Commitments of all the shards
 type Commitments struct {
-	lock    sync.RWMutex
-	commits map[uint64]*Commitment // shard:commitment (if any)
+	Lock    sync.RWMutex
+	Commits map[uint64]*Commitment // shard:commitment (if any)
 }
 
 // NewCommitments creates a new commitments
 func NewCommitments() *Commitments {
 	return &Commitments{
-		commits: make(map[uint64]*Commitment),
+		Commits: make(map[uint64]*Commitment),
 	}
 }
 
 // AddCommit adds a commit for some particular shard
 func (cm *Commitments) AddCommit(shard uint64, commit *Commitment) {
-	cm.lock.Lock()
-	defer cm.lock.Unlock()
-	cm.commits[shard] = commit
+	cm.Lock.Lock()
+	defer cm.Lock.Unlock()
+	cm.Commits[shard] = commit
 }
 
 // GetCommit returns commitment of a shard
 func (cm *Commitments) GetCommit(shard uint64) *Commitment {
-	cm.lock.RLock()
-	defer cm.lock.RUnlock()
-	return cm.commits[shard]
+	cm.Lock.RLock()
+	defer cm.Lock.RUnlock()
+	return cm.Commits[shard]
 }
 
 // CopyCommits accross reference numbers
 func (cm *Commitments) CopyCommits(numShard uint64, commits *Commitments) {
-	cm.lock.Lock()
-	defer cm.lock.Unlock()
+	cm.Lock.Lock()
+	defer cm.Lock.Unlock()
 	for shard := uint64(1); shard < numShard; shard++ {
 		commit := commits.GetCommit(shard)
-		cm.commits[shard] = &Commitment{
+		cm.Commits[shard] = &Commitment{
 			RefNum:    commit.RefNum,
 			StateRoot: commit.StateRoot,
 			BlockNum:  commit.BlockNum,
@@ -638,9 +640,9 @@ func (cm *Commitments) CopyCommits(numShard uint64, commits *Commitments) {
 
 // CommitNum fetches commitnumber of shard
 func (cm *Commitments) CommitNum(shard uint64) uint64 {
-	cm.lock.RLock()
-	defer cm.lock.RUnlock()
-	if commit, ok := cm.commits[shard]; ok {
+	cm.Lock.RLock()
+	defer cm.Lock.RUnlock()
+	if commit, ok := cm.Commits[shard]; ok {
 		return commit.BlockNum
 	}
 	log.Warn("Commitment not found for", "shard", shard)
@@ -649,111 +651,62 @@ func (cm *Commitments) CommitNum(shard uint64) uint64 {
 
 // DataCache stores foreign data for one block
 type DataCache struct {
-	dataCacheMu sync.RWMutex
-	refNum      uint64
-	status      bool
-	required    int
-	received    int                                       // overall data avaiability status
-	keyval      map[common.Address]*CKeys                 // list of (k,v) pairs for each contract
-	addrToShard map[common.Address]uint64                 // addr to shard mapping
-	shardStatus map[uint64]bool                           // shard to its status mapping
-	commits     map[uint64]*Commitment                    // Corresponding commit
-	values      map[common.Address]map[uint64]common.Hash // key-value pair per contract
+	DataCacheMu sync.RWMutex
+	RefNum      uint64
+	Status      bool
+	Required    int
+	Received    int                       // overall data avaiability status
+	Keyval      map[common.Address]*CKeys // list of (k,v) pairs for each contract
+	AddrToShard map[common.Address]uint64 // addr to shard mapping
+	ShardStatus map[uint64]bool           // shard to its status mapping
+	Commits     map[uint64]*Commitment    // Corresponding commit
+	Values      map[common.Address]*CData // key-value pair per contract
 }
 
 // NewDataCache creates a new datacache
 func NewDataCache(bnum uint64, status bool) *DataCache {
 	return &DataCache{
-		refNum:      bnum,
-		status:      status,
-		required:    0,
-		received:    0,
-		keyval:      make(map[common.Address]*CKeys),
-		addrToShard: make(map[common.Address]uint64),
-		shardStatus: make(map[uint64]bool),
-		commits:     make(map[uint64]*Commitment),
-		values:      make(map[common.Address]map[uint64]common.Hash),
+		RefNum:      bnum,
+		Status:      status,
+		Required:    0,
+		Received:    0,
+		Keyval:      make(map[common.Address]*CKeys),
+		AddrToShard: make(map[common.Address]uint64),
+		ShardStatus: make(map[uint64]bool),
+		Commits:     make(map[uint64]*Commitment),
+		Values:      make(map[common.Address]*CData),
 	}
-}
-
-// Status of particular reference block
-func (dc *DataCache) Status() bool {
-	dc.dataCacheMu.RLock()
-	defer dc.dataCacheMu.RUnlock()
-	return dc.status
-}
-
-// GetRoot retruns commitment of a shard
-func (dc *DataCache) GetRoot(shard uint64) common.Hash {
-	dc.dataCacheMu.RLock()
-	defer dc.dataCacheMu.RUnlock()
-	return dc.commits[shard].StateRoot
-}
-
-// StateRoot of a shard
-func (dc *DataCache) StateRoot(shard uint64) common.Hash {
-	dc.dataCacheMu.RLock()
-	defer dc.dataCacheMu.RUnlock()
-	return dc.commits[shard].StateRoot
-}
-
-func (dc *DataCache) AddrToShard() map[common.Address]uint64 {
-	dc.dataCacheMu.RLock()
-	defer dc.dataCacheMu.RUnlock()
-	return dc.addrToShard
-}
-
-func (dc *DataCache) GetKeys(addr common.Address) *CKeys {
-	dc.dataCacheMu.RLock()
-	defer dc.dataCacheMu.RUnlock()
-	return dc.keyval[addr]
-}
-
-func (dc *DataCache) ShardStatus(shard uint64) bool {
-	dc.dataCacheMu.RLock()
-	defer dc.dataCacheMu.RUnlock()
-	return dc.shardStatus[shard]
-}
-
-func (dc *DataCache) AllShardStatus() map[uint64]bool {
-	dc.dataCacheMu.RLock()
-	defer dc.dataCacheMu.RUnlock()
-	return dc.shardStatus
-}
-
-func (dc *DataCache) SetShardStatus(shard uint64, status bool) {
-	dc.dataCacheMu.Lock()
-	defer dc.dataCacheMu.Unlock()
-	dc.shardStatus[shard] = status
-}
-
-func (dc *DataCache) SetStatus(status bool) {
-	dc.dataCacheMu.Lock()
-	defer dc.dataCacheMu.Unlock()
-	dc.status = status
 }
 
 // AddData adds data corresponding to keys
 func (dc *DataCache) AddData(shard uint64, vals []*KeyVal) {
-	dc.dataCacheMu.Lock()
-	defer dc.dataCacheMu.Unlock()
-	shardStatus := dc.shardStatus[shard]
-	if !shardStatus {
+	dc.DataCacheMu.Lock()
+	defer dc.DataCacheMu.Unlock()
+	if !dc.ShardStatus[shard] {
 		for _, values := range vals {
 			caddr := values.Addr
+			cdata := &CData{
+				Addr:    caddr,
+				Nonce:   values.Nonce,
+				Balance: values.Balance,
+				Data:    make(map[common.Hash]common.Hash),
+			}
+
 			data := values.Data
 			lenData := len(data)
-			keys := dc.keyval[caddr].Keys
+			keys := dc.Keyval[caddr].Keys
 			for i := 0; i < lenData; i++ {
 				key := keys[i]
 				val := data[i]
-				dc.values[caddr][key] = val
+				cdata.Data[key] = val
 			}
+			dc.Values[caddr] = cdata
+			log.Info("@ds adding data for", "addr", dc.Values[caddr].Addr, "bal", dc.Values[caddr].Nonce)
 		}
-		dc.shardStatus[shard] = true
-		dc.received++
-		if dc.received == dc.required {
-			dc.status = true
+		dc.ShardStatus[shard] = true
+		dc.Received++
+		if dc.Received == dc.Required {
+			dc.Status = true
 		}
 	}
 }
@@ -761,11 +714,11 @@ func (dc *DataCache) AddData(shard uint64, vals []*KeyVal) {
 // InitKeys adds transaction detail
 func (dc *DataCache) InitKeys(myshard uint64, ctxs CrossShardTxs, commits *Commitments) {
 	var present bool
-	dc.dataCacheMu.Lock()
-	dc.received = 0
-	dc.required = 0
-	transactions := ctxs.Txs()
-	for _, ctx := range transactions {
+	dc.DataCacheMu.Lock()
+	defer dc.DataCacheMu.Unlock()
+	dc.Received = 0
+	dc.Required = 0
+	for _, ctx := range ctxs.Txs {
 		present = false
 		for _, shard := range ctx.Shards {
 			if shard == myshard {
@@ -775,29 +728,29 @@ func (dc *DataCache) InitKeys(myshard uint64, ctxs CrossShardTxs, commits *Commi
 		}
 		if present {
 			for shard, allKeys := range ctx.AllContracts {
-				if shard == myshard {
-					continue
-				}
-				if _, ok := dc.shardStatus[shard]; !ok {
-					dc.required++
-					dc.shardStatus[shard] = false
-					dc.commits[shard] = commits.GetCommit(shard)
+				if _, ok := dc.ShardStatus[shard]; !ok {
+					if shard == myshard {
+						dc.ShardStatus[shard] = true
+					} else {
+						dc.Required++
+						dc.ShardStatus[shard] = false
+						dc.Commits[shard] = commits.GetCommit(shard)
+					}
 				}
 				for _, contract := range allKeys {
 					caddr := contract.Addr
-					if _, cok := dc.addrToShard[caddr]; !cok {
-						dc.addrToShard[caddr] = shard
-						dc.keyval[caddr] = &CKeys{Addr: caddr}
-						dc.values[caddr] = make(map[uint64]common.Hash)
+					if _, cok := dc.AddrToShard[caddr]; !cok {
+						dc.AddrToShard[caddr] = shard
+						dc.Keyval[caddr] = &CKeys{Addr: caddr}
+						log.Info("@ds adding keys to KeyVal", "addr", caddr, "shard", shard)
 					}
 					for _, key := range contract.Keys {
-						dc.keyval[caddr].AddKey(key)
+						dc.Keyval[caddr].AddKey(key)
 					}
 				}
 			}
 		}
 	}
-	dc.dataCacheMu.Unlock()
 }
 
 // Message is a fully derived transaction and implements core.Message

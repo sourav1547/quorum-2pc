@@ -23,7 +23,9 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/state"
+	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
+	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/params"
 )
 
@@ -44,9 +46,9 @@ var emptyCodeHash = crypto.Keccak256Hash(nil)
 
 type (
 	// CanTransferFunc is the signature of a transfer guard function
-	CanTransferFunc func(StateDB, common.Address, *big.Int) bool
+	CanTransferFunc func(*types.DataCache, uint64, StateDB, common.Address, *big.Int) bool
 	// TransferFunc is the signature of a transfer function
-	TransferFunc func(StateDB, common.Address, common.Address, *big.Int)
+	TransferFunc func(uint64, *types.DataCache, map[common.Address]*types.CData, StateDB, common.Address, common.Address, *big.Int)
 	// GetHashFunc returns the nth block hash in the blockchain
 	// and is used by the BLOCKHASH EVM op code.
 	GetHashFunc func(uint64) common.Hash
@@ -73,6 +75,10 @@ func run(evm *EVM, contract *Contract, input []byte, readOnly bool) ([]byte, err
 				}(evm.interpreter)
 				evm.interpreter = interpreter
 			}
+			// if evm.Context.Shard > uint64(0) {
+			// 	log.Info("@ds before interpreter run", "root", evm.StateDB.IntermediateRoot(false),
+			// 		"shard", evm.Context.Shard)
+			// }
 			return interpreter.Run(contract, input, readOnly)
 		}
 	}
@@ -100,6 +106,7 @@ type Context struct {
 	BlockNumber *big.Int       // Provides information for NUMBER
 	Time        *big.Int       // Provides information for TIME
 	Difficulty  *big.Int       // Provides information for DIFFICULTY
+	Shard       uint64         // Provids information for BLOCK SHARD
 }
 
 type PublicState StateDB
@@ -117,6 +124,9 @@ type PrivateState StateDB
 type EVM struct {
 	// Context provides auxiliary blockchain related information
 	Context
+	// DC stores foreign data
+	dc        *types.DataCache
+	dcChanges map[common.Address]*types.CData
 	// StateDB gives access to the underlying state
 	StateDB StateDB
 	// Depth is the current call stack
@@ -154,9 +164,11 @@ type EVM struct {
 
 // NewEVM returns a new EVM. The returned EVM is not thread safe and should
 // only ever be used *once*.
-func NewEVM(ctx Context, statedb, privateState StateDB, chainConfig *params.ChainConfig, vmConfig Config) *EVM {
+func NewEVM(ctx Context, dc *types.DataCache, statedb, privateState StateDB, chainConfig *params.ChainConfig, vmConfig Config) *EVM {
 	evm := &EVM{
 		Context:      ctx,
+		dc:           dc,
+		dcChanges:    make(map[common.Address]*types.CData),
 		StateDB:      statedb,
 		vmConfig:     vmConfig,
 		chainConfig:  chainConfig,
@@ -193,6 +205,11 @@ func NewEVM(ctx Context, statedb, privateState StateDB, chainConfig *params.Chai
 	return evm
 }
 
+// Shard returns block shard
+func (evm *EVM) Shard() uint64 {
+	return evm.Context.Shard
+}
+
 // Cancel cancels any running EVM operation. This may be called concurrently and
 // it's safe to be called multiple times.
 func (evm *EVM) Cancel() {
@@ -221,14 +238,24 @@ func (evm *EVM) Call(caller ContractRef, addr common.Address, input []byte, gas 
 		return nil, gas, ErrDepth
 	}
 	// Fail if we're trying to transfer more than the available balance
-	if !evm.Context.CanTransfer(evm.StateDB, caller.Address(), value) {
+	if !evm.Context.CanTransfer(evm.dc, evm.Context.Shard, evm.StateDB, caller.Address(), value) {
 		return nil, gas, ErrInsufficientBalance
 	}
 
 	var (
 		to       = AccountRef(addr)
 		snapshot = evm.StateDB.Snapshot()
+		// s1       *state.StateDB
+		// s2       *state.StateDB
+		// s3       *state.StateDB
+		// s4       *state.StateDB
+		// s5       *state.StateDB
 	)
+
+	// if evm.Context.Shard > uint64(0) {
+	// 	log.Info("@ds before checking address", "root", evm.StateDB.IntermediateRoot(false))
+	// }
+
 	if !evm.StateDB.Exist(addr) {
 		precompiles := PrecompiledContractsHomestead
 		if evm.ChainConfig().IsByzantium(evm.BlockNumber) {
@@ -244,18 +271,26 @@ func (evm *EVM) Call(caller ContractRef, addr common.Address, input []byte, gas 
 		}
 		evm.StateDB.CreateAccount(addr)
 	}
+	// if evm.Context.Shard > uint64(0) {
+	// 	s1 = evm.StateDB.Copy()
+	// 	// log.Info("@ds before transfer", "root", evm.StateDB.IntermediateRoot(false))
+	// }
 	if evm.ChainConfig().IsQuorum {
 		// skip transfer if value /= 0 (see note: Quorum, States, and Value Transfer)
 		if value.Sign() != 0 {
 			if evm.quorumReadOnly {
 				return nil, gas, ErrReadOnlyValueTransfer
 			}
-			evm.Transfer(evm.StateDB, caller.Address(), to.Address(), value)
+			evm.Transfer(evm.Context.Shard, evm.dc, evm.dcChanges, evm.StateDB, caller.Address(), to.Address(), value)
 		}
 	} else {
-		evm.Transfer(evm.StateDB, caller.Address(), to.Address(), value)
+		evm.Transfer(evm.Context.Shard, evm.dc, evm.dcChanges, evm.StateDB, caller.Address(), to.Address(), value)
 	}
 
+	// if evm.Context.Shard > uint64(0) {
+	// 	s2 = evm.StateDB.Copy()
+	// 	// 	log.Info("@ds after transfer", "root", evm.StateDB.IntermediateRoot(false))
+	// }
 	// Initialise a new contract and set the code that is to be used by the EVM.
 	// The contract is a scoped environment for this execution context only.
 	contract := NewContract(caller, to, value, gas)
@@ -272,7 +307,15 @@ func (evm *EVM) Call(caller ContractRef, addr common.Address, input []byte, gas 
 			evm.vmConfig.Tracer.CaptureEnd(ret, gas-contract.Gas, time.Since(start), err)
 		}()
 	}
+	// if evm.Context.Shard > uint64(0) {
+	// 	s3 = evm.StateDB.Copy()
+	// 	// 	log.Info("@ds before run", "root", evm.StateDB.IntermediateRoot(false))
+	// }
 	ret, err = run(evm, contract, input, false)
+	// if evm.Context.Shard > uint64(0) {
+	// 	s4 = evm.StateDB.Copy()
+	// 	// 	log.Info("@ds after run", "root", evm.StateDB.IntermediateRoot(false), "err", err)
+	// }
 
 	// When an error was returned by the EVM or when setting the creation code
 	// above we revert to the snapshot and consume any gas remaining. Additionally
@@ -283,6 +326,10 @@ func (evm *EVM) Call(caller ContractRef, addr common.Address, input []byte, gas 
 			contract.UseGas(contract.Gas)
 		}
 	}
+	// s5 = evm.StateDB.Copy()
+	// if evm.Context.Shard > uint64(0) {
+	// 	log.Info("@ds roots", "s1", s1.IntermediateRoot(false), "s2", s2.IntermediateRoot(false), "s3", s3.IntermediateRoot(false), "s4", s4.IntermediateRoot(false), "s5", s5.IntermediateRoot(false), "err", err)
+	// }
 	return ret, contract.Gas, err
 }
 
@@ -306,7 +353,7 @@ func (evm *EVM) CallCode(caller ContractRef, addr common.Address, input []byte, 
 		return nil, gas, ErrDepth
 	}
 	// Fail if we're trying to transfer more than the available balance
-	if !evm.CanTransfer(evm.StateDB, caller.Address(), value) {
+	if !evm.CanTransfer(evm.dc, evm.Context.Shard, evm.StateDB, caller.Address(), value) {
 		return nil, gas, ErrInsufficientBalance
 	}
 
@@ -424,7 +471,7 @@ func (evm *EVM) create(caller ContractRef, codeAndHash *codeAndHash, gas uint64,
 	if evm.depth > int(params.CallCreateDepth) {
 		return nil, common.Address{}, gas, ErrDepth
 	}
-	if !evm.CanTransfer(evm.StateDB, caller.Address(), value) {
+	if !evm.CanTransfer(evm.dc, evm.Context.Shard, evm.StateDB, caller.Address(), value) {
 		return nil, common.Address{}, gas, ErrInsufficientBalance
 	}
 
@@ -464,10 +511,10 @@ func (evm *EVM) create(caller ContractRef, codeAndHash *codeAndHash, gas uint64,
 			if evm.quorumReadOnly {
 				return nil, common.Address{}, gas, ErrReadOnlyValueTransfer
 			}
-			evm.Transfer(evm.StateDB, caller.Address(), address, value)
+			evm.Transfer(evm.Context.Shard, evm.dc, evm.dcChanges, evm.StateDB, caller.Address(), address, value)
 		}
 	} else {
-		evm.Transfer(evm.StateDB, caller.Address(), address, value)
+		evm.Transfer(evm.Context.Shard, evm.dc, evm.dcChanges, evm.StateDB, caller.Address(), address, value)
 	}
 
 	// initialise a new contract and set the code that is to be used by the
@@ -567,6 +614,104 @@ func (evm *EVM) Create2(caller ContractRef, code []byte, gas uint64, endowment *
 // ChainConfig returns the environment's chain configuration
 func (evm *EVM) ChainConfig() *params.ChainConfig { return evm.chainConfig }
 
+func getBalance(env *EVM, addr common.Address) (*big.Int, error) {
+	if env.dc != nil {
+		var (
+			shard uint64
+			sok   bool
+		)
+		if shard, sok = env.dc.AddrToShard[addr]; !sok {
+			log.Info("@ds returning balance ErrAddressNotFound")
+			return nil, ErrAddressNotFound
+		}
+		if shard != env.Context.Shard {
+			if _, ok := env.dcChanges[addr]; !ok {
+				vals := env.dc.Values[addr]
+				env.dcChanges[addr] = &types.CData{
+					Addr:    addr,
+					Balance: vals.Balance,
+					Nonce:   vals.Nonce,
+					Data:    make(map[common.Hash]common.Hash),
+				}
+			}
+			balance := env.dcChanges[addr].Balance
+			log.Info("@ds returning balance from cache", "addr", addr, "bal", balance)
+			return new(big.Int).SetUint64(balance), nil
+		}
+	}
+	state := getDualState(env, addr)
+	balance := state.GetBalance(addr).Uint64()
+	if env.Context.Shard > uint64(0) {
+		log.Info("@ds returning balance from state", "dc", env.dc, "addr", addr, "balance", balance)
+	}
+	return state.GetBalance(addr), nil
+}
+
+func setState(env *EVM, addr common.Address, loc, val common.Hash) error {
+	if env.dc != nil {
+		var (
+			shard uint64
+			sok   bool
+		)
+		if shard, sok = env.dc.AddrToShard[addr]; !sok {
+			log.Info("@ds setState ErrAddressNotFound")
+			return ErrAddressNotFound
+		}
+		if shard != env.Context.Shard {
+			if _, ok := env.dcChanges[addr]; !ok {
+				vals := env.dc.Values[addr]
+				env.dcChanges[addr] = &types.CData{
+					Addr:    addr,
+					Balance: vals.Balance,
+					Nonce:   vals.Nonce,
+					Data:    make(map[common.Hash]common.Hash),
+				}
+			}
+			env.dcChanges[addr].Data[loc] = val
+			log.Info("@ds updating state in cache ", "addr", addr, "loc", loc, "val", val)
+			return nil
+		}
+	}
+	if env.Context.Shard > uint64(0) {
+		log.Info("@ds updating state in state", "dc", env.dc, "addr", addr, "loc", loc, "val", val)
+	}
+	getDualState(env, addr).SetState(addr, loc, val)
+	return nil
+}
+
+func getStateAt(env *EVM, addr common.Address, loc common.Hash) (common.Hash, error) {
+	if env.dc != nil {
+		var (
+			shard uint64
+			sok   bool
+		)
+		if shard, sok = env.dc.AddrToShard[addr]; !sok {
+			log.Info("@ds returning 1 ErrAddressNotFound")
+			return common.Hash{}, ErrAddressNotFound
+		}
+		if shard != env.Context.Shard {
+			if _, ok := env.dcChanges[addr]; !ok {
+				vals := env.dc.Values[addr]
+				env.dcChanges[addr] = &types.CData{
+					Addr:    addr,
+					Balance: vals.Balance,
+					Nonce:   vals.Nonce,
+					Data:    make(map[common.Hash]common.Hash),
+				}
+			}
+			val := env.dcChanges[addr].Data[loc]
+			log.Info("@ds returning state from cache", "addr", addr, "loc", loc, "val", val)
+			return val, nil
+		}
+	}
+	state := getDualState(env, addr)
+	val := state.GetState(addr, loc)
+	if env.Context.Shard > uint64(0) {
+		log.Info("@ds returning state from state", "dc", env.dc, "addr", addr, "loc", loc, "val", val)
+	}
+	return val, nil
+}
+
 func getDualState(env *EVM, addr common.Address) StateDB {
 	// priv: (a) -> (b)  (private)
 	// pub:   a  -> [b]  (private -> public)
@@ -583,6 +728,7 @@ func getDualState(env *EVM, addr common.Address) StateDB {
 }
 
 func (env *EVM) PublicState() PublicState   { return env.publicState }
+func (env *EVM) DC() *types.DataCache       { return env.dc }
 func (env *EVM) PrivateState() PrivateState { return env.privateState }
 func (env *EVM) Push(statedb StateDB) {
 	// Quorum : the read only depth to be set up only once for the entire
@@ -603,11 +749,15 @@ func (env *EVM) Push(statedb StateDB) {
 	env.StateDB = statedb
 }
 func (env *EVM) Pop() {
+	// start := env.StateDB.Copy()
 	env.currentStateDepth--
 	if env.quorumReadOnly && env.currentStateDepth == env.readOnlyDepth {
 		env.quorumReadOnly = false
 	}
 	env.StateDB = env.states[env.currentStateDepth-1]
+	// if env.Context.Shard > uint64(0) {
+	// 	log.Info("@ds Updated state inside Pop", "start", start.IntermediateRoot(false), "end", env.StateDB.IntermediateRoot(false))
+	// }
 }
 
 func (env *EVM) Depth() int { return env.depth }

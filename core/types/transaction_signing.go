@@ -77,7 +77,7 @@ func Sender(signer Signer, tx *Transaction) (common.Address, error) {
 	} else if tx.TxType() == CrossShardLocal {
 		// @sourav, todo: fix this by including signature in the
 		// in the cross cross-shard!!
-		seed := "1f4C9072066DB5bE27A28E932cF4792920Eb7Fb4"
+		seed := "dFE5DC48FE2a225160e9eD0524Eef46aAc12b65e"
 		addr := new(big.Int)
 		addr, _ = addr.SetString(seed, 16)
 		return common.BigToAddress(addr), nil

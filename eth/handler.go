@@ -989,11 +989,11 @@ func (pm *ProtocolManager) AddFetchedData(refNum, pshard uint64, vals []*types.K
 	dc := pm.foreignData[refNum]
 	pm.foreignDataMu.RUnlock()
 	if dc != nil {
-		if !dc.ShardStatus(pshard) {
+		if !dc.ShardStatus[pshard] {
 			dc.AddData(pshard, vals)
-			log.Debug("Foreign Data added", "refnum", refNum, "shard", pshard, "status", dc.Status())
-			if dc.Status() {
-				go pm.blockchain.PostForeignDataEvent()
+			log.Debug("Foreign Data added", "refnum", refNum, "shard", pshard, "status", dc.Status)
+			if dc.Status {
+				go pm.blockchain.PostForeignDataEvent(refNum)
 			}
 		}
 	}
@@ -1001,20 +1001,25 @@ func (pm *ProtocolManager) AddFetchedData(refNum, pshard uint64, vals []*types.K
 
 // FetchData requests data from appropriate shard
 func (pm *ProtocolManager) FetchData(start, end uint64) {
-	pm.foreignDataMu.RLock()
-	defer pm.foreignDataMu.RUnlock()
 	for refNum := start; refNum <= end; refNum++ {
+
+		pm.foreignDataMu.RLock()
 		dc := pm.foreignData[refNum]
-		if !dc.Status() {
-			for shard := range dc.AllShardStatus() {
-				if shard == pm.myshard {
-					continue
+		pm.foreignDataMu.RUnlock()
+
+		dc.DataCacheMu.RLock()
+		status := dc.Status
+		dc.DataCacheMu.RUnlock()
+
+		if !status {
+			for shard := range dc.ShardStatus {
+				if shard != pm.myshard {
+					dc.DataCacheMu.RLock()
+					root := dc.Commits[shard].StateRoot
+					dc.DataCacheMu.RUnlock()
+					go pm.FetchDataShard(refNum, shard, root)
 				}
-				root := dc.GetRoot(shard)
-				go pm.FetchDataShard(refNum, shard, root)
 			}
-		} else {
-			log.Debug("No foreign data required for", "number", refNum)
 		}
 	}
 }
@@ -1026,12 +1031,14 @@ func (pm *ProtocolManager) FetchDataShard(refNum, shard uint64, root common.Hash
 		keys  []*types.CKeys
 		count uint64
 	)
-	for addr, lshard := range dc.AddrToShard() {
+	dc.DataCacheMu.RLock()
+	for addr, lshard := range dc.AddrToShard {
 		if lshard == shard {
-			keys = append(keys, dc.GetKeys(addr))
+			keys = append(keys, dc.Keyval[addr])
 			count++
 		}
 	}
+	dc.DataCacheMu.RUnlock()
 
 	pm.cousinPeerLock.RLock()
 	peers := pm.cousinPeers[shard].PeersWithoutRequest(refNum)

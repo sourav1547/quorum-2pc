@@ -24,12 +24,14 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/core/vm"
+	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/params"
 	"github.com/ethereum/go-ethereum/private"
 )
 
 var (
 	errInsufficientBalanceForGas = errors.New("insufficient balance to pay for gas")
+	errKeyNotFound               = errors.New("cross-shard address not found in mentioned set")
 )
 
 /*
@@ -59,6 +61,8 @@ type StateTransition struct {
 	value      *big.Int
 	data       []byte
 	state      vm.StateDB
+	dc         *types.DataCache
+	bshard     uint64
 	evm        *vm.EVM
 }
 
@@ -128,6 +132,8 @@ func NewStateTransition(evm *vm.EVM, msg Message, gp *GasPool) *StateTransition 
 		gasPrice: msg.GasPrice(),
 		value:    msg.Value(),
 		data:     msg.Data(),
+		dc:       evm.DC(),
+		bshard:   evm.Shard(),
 		state:    evm.PublicState(),
 	}
 }
@@ -257,7 +263,31 @@ func (st *StateTransition) TransitionDb() (ret []byte, usedGas uint64, failed bo
 		// If the transaction is private it has already been incremented on
 		// the public state.
 		if !isPrivate {
-			publicState.SetNonce(msg.From(), publicState.GetNonce(sender.Address())+1)
+			if st.dc != nil && st.bshard > uint64(0) {
+				var (
+					shard uint64
+					ok    bool
+					addr  = sender.Address()
+				)
+				// st.dc.DataCacheMu.Lock()
+				if shard, ok = st.dc.AddrToShard[addr]; ok {
+					if shard == st.bshard {
+						publicState.SetNonce(msg.From(), publicState.GetNonce(sender.Address())+1)
+					} else {
+						if st.dc.Values[addr] == nil {
+							log.Info("@ds, setting nonce", "addr", addr, "values", st.dc.Values[addr])
+						}
+						st.dc.Values[addr].Nonce = st.dc.Values[addr].Nonce + uint64(1)
+					}
+					// st.dc.DataCacheMu.Unlock()
+				} else {
+					// st.dc.DataCacheMu.Unlock()
+					log.Error("Address not found in the mentioned list")
+					return nil, 0, false, errKeyNotFound
+				}
+			} else {
+				publicState.SetNonce(msg.From(), publicState.GetNonce(sender.Address())+1)
+			}
 		}
 		var to common.Address
 		if isQuorum {
@@ -272,7 +302,13 @@ func (st *StateTransition) TransitionDb() (ret []byte, usedGas uint64, failed bo
 			return nil, 0, false, nil
 		}
 
+		// s1 := evm.StateDB.Copy()
 		ret, leftoverGas, vmerr = evm.Call(sender, to, data, st.gas, st.value)
+		// s2 := evm.StateDB.Copy()
+		// if evm.Context.Shard > uint64(0) {
+		// 	log.Info("@ds TransitionDb", "s1", s1.IntermediateRoot(false), "s2",
+		// 		s2.IntermediateRoot(false))
+		// }
 	}
 	if vmerr != nil {
 		// The only possible consensus-error would be if there wasn't

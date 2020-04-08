@@ -109,7 +109,7 @@ func (b *LesApiBackend) GetEVM(ctx context.Context, msg core.Message, apiState v
 	statedb := apiState.(*state.StateDB)
 	statedb.SetBalance(msg.From(), math.MaxBig256)
 	context := core.NewEVMContext(msg, header, b.eth.blockchain, nil)
-	return vm.NewEVM(context, statedb, statedb, b.eth.chainConfig, vmCfg), statedb.Error, nil
+	return vm.NewEVM(context, nil, statedb, statedb, b.eth.chainConfig, vmCfg), statedb.Error, nil
 }
 
 func (b *LesApiBackend) SendTx(ctx context.Context, signedTx *types.Transaction) error {

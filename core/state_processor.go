@@ -54,7 +54,8 @@ func NewStateProcessor(config *params.ChainConfig, bc *BlockChain, engine consen
 // Process returns the receipts and logs accumulated during the process and
 // returns the amount of gas that was used in the process. If any of the
 // transactions failed to execute due to insufficient gas it will return an error.
-func (p *StateProcessor) Process(block *types.Block, statedb, privateState *state.StateDB, cfg vm.Config) (types.Receipts, types.Receipts, []*types.Log, uint64, error) {
+func (p *StateProcessor) Process(block *types.Block, foreignData map[uint64]*types.DataCache,
+	pendingCrossTxs map[uint64]types.CrossShardTxs, start, end uint64, statedb, privateState *state.StateDB, cfg vm.Config) (types.Receipts, types.Receipts, []*types.Log, uint64, error) {
 
 	var (
 		receipts types.Receipts
@@ -62,6 +63,8 @@ func (p *StateProcessor) Process(block *types.Block, statedb, privateState *stat
 		header   = block.Header()
 		allLogs  []*types.Log
 		gp       = new(GasPool).AddGas(block.GasLimit())
+		dc       *types.DataCache
+		curr     = start
 
 		privateReceipts types.Receipts
 	)
@@ -77,11 +80,34 @@ func (p *StateProcessor) Process(block *types.Block, statedb, privateState *stat
 		snap := statedb.Snapshot()
 		psnap := privateState.Snapshot()
 
-		receipt, privateReceipt, _, err := ApplyTransaction(p.config, p.bc, nil, gp, statedb, privateState, header, tx, usedGas, cfg)
+		if tx.TxType() != types.CrossShardLocal {
+			dc = nil
+		} else {
+			for curr <= end {
+				found := false
+				for _, ctx := range pendingCrossTxs[curr].Txs {
+					if tx.Hash() == ctx.Tx.Hash() {
+						dc = foreignData[curr]
+						found = true
+						log.Info("@ds transaction found ", "hash", tx.Hash(), "refNum", curr)
+						break
+					}
+				}
+				if found {
+					break
+				}
+				log.Info("@ds stuck in loop")
+				curr++
+			}
+		}
+
+		// s1 := statedb.Copy()
+		receipt, privateReceipt, _, err := ApplyTransaction(p.config, p.bc, nil, gp, dc, statedb, privateState, header, tx, usedGas, cfg)
+		// s2 := statedb.Copy()
 		if tx.TxType() == types.CrossShardLocal && err != nil {
 			statedb.RevertToSnapshot(snap)
 			privateState.RevertToSnapshot(psnap)
-			log.Warn("Skipping transaction", "thash", tx.Hash(), "error", err)
+			log.Warn("Skipping transaction", "thash", tx.Hash(), "from", tx.From(), "error", err)
 			continue
 		}
 		if err != nil {
@@ -96,9 +122,19 @@ func (p *StateProcessor) Process(block *types.Block, statedb, privateState *stat
 			privateReceipts = append(privateReceipts, privateReceipt)
 			allLogs = append(allLogs, privateReceipt.Logs...)
 		}
+
+		// if header.Shard > uint64(0) {
+		// 	log.Info("@ds Process Tx ", "s1", s1.IntermediateRoot(false), "s2", s2.IntermediateRoot(false))
+		// }
+
 	}
 	// Finalize the block, applying any consensus engine specific extras (e.g. block rewards)
+	// s3 := statedb.Copy()
 	p.engine.Finalize(p.bc, header, statedb, block.Transactions(), block.Uncles(), receipts)
+	// s4 := statedb.Copy()
+	// if header.Shard > uint64(0) {
+	// 	log.Info("@ds Process before finalize", "s3", s3.IntermediateRoot(false), "s4", s4.IntermediateRoot(false))
+	// }
 	return receipts, privateReceipts, allLogs, *usedGas, nil
 }
 
@@ -106,7 +142,7 @@ func (p *StateProcessor) Process(block *types.Block, statedb, privateState *stat
 // and uses the input parameters for its environment. It returns the receipt
 // for the transaction, gas used and an error if the transaction failed,
 // indicating the block was invalid.
-func ApplyTransaction(config *params.ChainConfig, bc *BlockChain, author *common.Address, gp *GasPool, statedb, privateState *state.StateDB, header *types.Header, tx *types.Transaction, usedGas *uint64, cfg vm.Config) (*types.Receipt, *types.Receipt, uint64, error) {
+func ApplyTransaction(config *params.ChainConfig, bc *BlockChain, author *common.Address, gp *GasPool, dc *types.DataCache, statedb, privateState *state.StateDB, header *types.Header, tx *types.Transaction, usedGas *uint64, cfg vm.Config) (*types.Receipt, *types.Receipt, uint64, error) {
 	if !config.IsQuorum || !tx.IsPrivate() {
 		privateState = statedb
 	}
@@ -128,22 +164,31 @@ func ApplyTransaction(config *params.ChainConfig, bc *BlockChain, author *common
 	context := NewEVMContext(msg, header, bc, author)
 	// Create a new environment which holds all relevant information
 	// about the transaction and calling mechanisms.
-	vmenv := vm.NewEVM(context, statedb, privateState, config, cfg)
+	vmenv := vm.NewEVM(context, dc, statedb, privateState, config, cfg)
 
 	// Apply the transaction to the current state (included in the env)
 	_, gas, failed, err := ApplyMessage(vmenv, msg, gp)
 	if err != nil {
 		return nil, nil, 0, err
 	}
+
+	// s1 := statedb.Copy()
 	// Update the state with pending changes
 	var root []byte
 	if config.IsByzantium(header.Number) {
+		// if header.Shard > uint64(0) {
+		// 	log.Info("config.IsByzantium")
+		// }
 		statedb.Finalise(true)
 	} else {
 		root = statedb.IntermediateRoot(config.IsEIP158(header.Number)).Bytes()
 	}
 	*usedGas += gas
+	// s2 := statedb.Copy()
 
+	// if header.Shard > uint64(0) {
+	// 	log.Info("@ds Apply transaction", "s1", s1.IntermediateRoot(false), "s2", s2.IntermediateRoot(false))
+	// }
 	// If this is a private transaction, the public receipt should always
 	// indicate success.
 	publicFailed := !(config.IsQuorum && tx.IsPrivate()) && failed
@@ -165,7 +210,7 @@ func ApplyTransaction(config *params.ChainConfig, bc *BlockChain, author *common
 	if config.IsQuorum && tx.IsPrivate() {
 		var privateRoot []byte
 		if config.IsByzantium(header.Number) {
-			privateState.Finalise(true)
+			privateState.Finalise(false)
 		} else {
 			privateRoot = privateState.IntermediateRoot(config.IsEIP158(header.Number)).Bytes()
 		}

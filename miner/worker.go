@@ -86,6 +86,7 @@ const (
 type environment struct {
 	signer types.Signer
 
+	dc        *types.DataCache
 	state     *state.StateDB // apply state changes here
 	ancestors mapset.Set     // ancestor set (used for checking uncle parent validity)
 	family    mapset.Set     // family set (used for checking uncle invalidity)
@@ -875,7 +876,7 @@ func (w *worker) processCrossTxs() {
 		w.foreignDataMu.RLock()
 		dc := w.foreignData[current]
 		w.foreignDataMu.RUnlock()
-		if !dc.Status() {
+		if !dc.Status {
 			select {
 			case <-w.foreignDataCh:
 				refNum = w.getRefNumberU64()
@@ -883,7 +884,7 @@ func (w *worker) processCrossTxs() {
 				return
 			}
 		} else {
-			err := w.commitPendingBlock(current)
+			err := w.commitPendingBlock(current, dc)
 			if err == nil {
 				select {
 				case w.pendingResultCh <- struct{}{}:
@@ -899,7 +900,7 @@ func (w *worker) processCrossTxs() {
 	return
 }
 
-func (w *worker) commitPendingBlock(work uint64) error {
+func (w *worker) commitPendingBlock(work uint64, dc *types.DataCache) error {
 
 	commitNum := w.commitNum()
 	commitBlock := w.chain.GetBlockByNumber(commitNum)
@@ -916,6 +917,7 @@ func (w *worker) commitPendingBlock(work uint64) error {
 	w.refCacheMu.RLock()
 	env := &environment{
 		signer:       types.MakeSigner(w.config, bCommitNum),
+		dc:           dc,
 		state:        w.refCache.State,
 		privateState: privateState,
 		txs:          w.refCache.Txs,
@@ -952,7 +954,7 @@ func (w *worker) commitPendingBlock(work uint64) error {
 	w.crossTxsLock.RLock()
 	cTxs := w.pendingCrossTxs[work]
 	w.crossTxsLock.RUnlock()
-	for _, ctx := range cTxs.Txs() {
+	for _, ctx := range cTxs.Txs {
 		tx := ctx.Tx
 		env.state.Prepare(tx.Hash(), common.Hash{}, env.tcount)
 		env.privateState.Prepare(tx.Hash(), common.Hash{}, env.tcount)
@@ -981,7 +983,7 @@ func (w *worker) commitPendingTransaction(tx *types.Transaction, header *types.H
 	snap := env.state.Snapshot()
 	psnap := env.privateState.Snapshot()
 	coinbase := w.coinbase
-	receipt, _, _, err := core.ApplyTransaction(w.config, w.chain, &coinbase, env.gasPool, env.state, env.privateState, header, tx, &header.GasUsed, vm.Config{})
+	receipt, _, _, err := core.ApplyTransaction(w.config, w.chain, &coinbase, env.gasPool, env.dc, env.state, env.privateState, header, tx, &header.GasUsed, vm.Config{})
 	if err != nil {
 		env.state.RevertToSnapshot(snap)
 		env.privateState.RevertToSnapshot(psnap)
@@ -1125,7 +1127,7 @@ func (w *worker) commitTransaction(tx *types.Transaction, coinbase common.Addres
 	snap := w.current.state.Snapshot()
 	privateSnap := w.current.privateState.Snapshot()
 
-	receipt, privateReceipt, _, err := core.ApplyTransaction(w.config, w.chain, &coinbase, w.current.gasPool, w.current.state, w.current.privateState, w.current.header, tx, &w.current.header.GasUsed, vm.Config{})
+	receipt, privateReceipt, _, err := core.ApplyTransaction(w.config, w.chain, &coinbase, w.current.gasPool, nil, w.current.state, w.current.privateState, w.current.header, tx, &w.current.header.GasUsed, vm.Config{})
 	if err != nil {
 		w.current.state.RevertToSnapshot(snap)
 		w.current.privateState.RevertToSnapshot(privateSnap)
@@ -1201,7 +1203,7 @@ func (w *worker) commitInitialContract(coinbase common.Address, interrupt *int32
 		snap := w.current.state.Snapshot()
 		privateSnap := w.current.privateState.Snapshot()
 
-		receipt, privateReceipt, _, err := core.ApplyTransaction(w.config, w.chain, &coinbase, w.current.gasPool, w.current.state, w.current.privateState, w.current.header, tx, &w.current.header.GasUsed, vm.Config{})
+		receipt, privateReceipt, _, err := core.ApplyTransaction(w.config, w.chain, &coinbase, w.current.gasPool, nil, w.current.state, w.current.privateState, w.current.header, tx, &w.current.header.GasUsed, vm.Config{})
 		if err != nil {
 			w.current.state.RevertToSnapshot(snap)
 			w.current.privateState.RevertToSnapshot(privateSnap)

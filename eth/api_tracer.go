@@ -283,7 +283,7 @@ func (api *PrivateDebugAPI) traceChain(ctx context.Context, start, end *types.Bl
 				traced += uint64(len(txs))
 			}
 			// Generate the next state snapshot fast without tracing
-			_, _, _, _, err := api.eth.blockchain.Processor().Process(block, statedb, privateStateDb, vm.Config{})
+			_, _, _, _, err := api.eth.blockchain.Processor().Process(block, nil, nil, uint64(0), uint64(0), statedb, privateStateDb, vm.Config{})
 			if err != nil {
 				failed = err
 				break
@@ -481,7 +481,7 @@ func (api *PrivateDebugAPI) traceBlock(ctx context.Context, block *types.Block, 
 		msg, _ := tx.AsMessage(signer)
 		vmctx := core.NewEVMContext(msg, block.Header(), api.eth.blockchain, nil)
 
-		vmenv := vm.NewEVM(vmctx, statedb, privateStateDb, api.config, vm.Config{})
+		vmenv := vm.NewEVM(vmctx, nil, statedb, privateStateDb, api.config, vm.Config{})
 		if _, _, _, err := core.ApplyMessage(vmenv, msg, new(core.GasPool).AddGas(msg.Gas())); err != nil {
 			failed = err
 			break
@@ -547,7 +547,7 @@ func (api *PrivateDebugAPI) computeStateDB(block *types.Block, reexec uint64) (*
 		if block = api.eth.blockchain.GetBlockByNumber(block.NumberU64() + 1); block == nil {
 			return nil, nil, fmt.Errorf("block #%d not found", block.NumberU64()+1)
 		}
-		_, _, _, _, err := api.eth.blockchain.Processor().Process(block, statedb, privateStateDb, vm.Config{})
+		_, _, _, _, err := api.eth.blockchain.Processor().Process(block, nil, nil, uint64(0), uint64(0), statedb, privateStateDb, vm.Config{})
 		if err != nil {
 			return nil, nil, err
 		}
@@ -640,7 +640,7 @@ func (api *PrivateDebugAPI) traceTx(ctx context.Context, message core.Message, v
 	}
 
 	// Run the transaction with tracing enabled.
-	vmenv := vm.NewEVM(vmctx, statedb, privateStateDb, api.config, vm.Config{Debug: true, Tracer: tracer})
+	vmenv := vm.NewEVM(vmctx, nil, statedb, privateStateDb, api.config, vm.Config{Debug: true, Tracer: tracer})
 
 	ret, gas, failed, err := core.ApplyMessage(vmenv, message, new(core.GasPool).AddGas(message.Gas()))
 	if err != nil {
@@ -690,7 +690,7 @@ func (api *PrivateDebugAPI) computeTxEnv(blockHash common.Hash, txIndex int, ree
 			return msg, context, statedb, privateStateDb, nil
 		}
 		// Not yet the searched for transaction, execute on top of the current state
-		vmenv := vm.NewEVM(context, statedb, privateStateDb, api.config, vm.Config{})
+		vmenv := vm.NewEVM(context, nil, statedb, privateStateDb, api.config, vm.Config{})
 		if _, _, _, err := core.ApplyMessage(vmenv, msg, new(core.GasPool).AddGas(tx.Gas())); err != nil {
 			return nil, vm.Context{}, nil, nil, fmt.Errorf("tx %x failed: %v", tx.Hash(), err)
 		}
