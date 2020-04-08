@@ -989,12 +989,20 @@ func (pm *ProtocolManager) AddFetchedData(refNum, pshard uint64, vals []*types.K
 	dc := pm.foreignData[refNum]
 	pm.foreignDataMu.RUnlock()
 	if dc != nil {
+		dc.DataCacheMu.RLock()
 		if !dc.ShardStatus[pshard] {
+			dc.DataCacheMu.RUnlock()
 			dc.AddData(pshard, vals)
-			log.Debug("Foreign Data added", "refnum", refNum, "shard", pshard, "status", dc.Status)
-			if dc.Status {
+
+			dc.DataCacheMu.RLock()
+			status := dc.Status
+			dc.DataCacheMu.RUnlock()
+			log.Debug("Foreign Data added", "refnum", refNum, "shard", pshard, "status", status)
+			if status {
 				go pm.blockchain.PostForeignDataEvent(refNum)
 			}
+		} else {
+			dc.DataCacheMu.RUnlock()
 		}
 	}
 }
@@ -1026,7 +1034,9 @@ func (pm *ProtocolManager) FetchData(start, end uint64) {
 
 // FetchDataShard sends request for each data
 func (pm *ProtocolManager) FetchDataShard(refNum, shard uint64, root common.Hash) {
+	pm.foreignDataMu.RLock()
 	dc := pm.foreignData[refNum]
+	pm.foreignDataMu.RUnlock()
 	var (
 		keys  []*types.CKeys
 		count uint64

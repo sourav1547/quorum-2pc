@@ -32,6 +32,7 @@ import (
 var (
 	errInsufficientBalanceForGas = errors.New("insufficient balance to pay for gas")
 	errKeyNotFound               = errors.New("cross-shard address not found in mentioned set")
+	errNilValueFound             = errors.New("Value nill for cross-shard transaction")
 )
 
 /*
@@ -269,19 +270,23 @@ func (st *StateTransition) TransitionDb() (ret []byte, usedGas uint64, failed bo
 					ok    bool
 					addr  = sender.Address()
 				)
-				// st.dc.DataCacheMu.Lock()
+				st.dc.DataCacheMu.RLock()
 				if shard, ok = st.dc.AddrToShard[addr]; ok {
+					st.dc.DataCacheMu.RUnlock()
 					if shard == st.bshard {
 						publicState.SetNonce(msg.From(), publicState.GetNonce(sender.Address())+1)
 					} else {
+						st.dc.DataCacheMu.Lock()
 						if st.dc.Values[addr] == nil {
-							log.Info("@ds, setting nonce", "addr", addr, "values", st.dc.Values[addr])
+							log.Warn("Values in datache is nill for", "addr", addr)
+							return nil, 0, false, errNilValueFound
+						} else {
+							st.dc.Values[addr].Nonce = st.dc.Values[addr].Nonce + uint64(1)
+							st.dc.DataCacheMu.Unlock()
 						}
-						st.dc.Values[addr].Nonce = st.dc.Values[addr].Nonce + uint64(1)
 					}
-					// st.dc.DataCacheMu.Unlock()
 				} else {
-					// st.dc.DataCacheMu.Unlock()
+					st.dc.DataCacheMu.RUnlock()
 					log.Error("Address not found in the mentioned list")
 					return nil, 0, false, errKeyNotFound
 				}
@@ -306,7 +311,7 @@ func (st *StateTransition) TransitionDb() (ret []byte, usedGas uint64, failed bo
 		ret, leftoverGas, vmerr = evm.Call(sender, to, data, st.gas, st.value)
 		// s2 := evm.StateDB.Copy()
 		// if evm.Context.Shard > uint64(0) {
-		// 	log.Info("@ds TransitionDb", "s1", s1.IntermediateRoot(false), "s2",
+		// 	log.Debug("@ds TransitionDb", "s1", s1.IntermediateRoot(false), "s2",
 		// 		s2.IntermediateRoot(false))
 		// }
 	}

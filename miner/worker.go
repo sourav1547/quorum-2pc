@@ -877,7 +877,13 @@ func (w *worker) processCrossTxs() {
 		w.foreignDataMu.RLock()
 		dc := w.foreignData[current]
 		w.foreignDataMu.RUnlock()
-		if !dc.Status {
+		status := false
+		if dc != nil {
+			dc.DataCacheMu.RLock()
+			status = dc.Status
+			dc.DataCacheMu.RUnlock()
+		}
+		if !status {
 			select {
 			case <-w.foreignDataCh:
 				refNum = w.getRefNumberU64()
@@ -889,8 +895,6 @@ func (w *worker) processCrossTxs() {
 			if err == nil {
 				select {
 				case w.pendingResultCh <- struct{}{}:
-				case <-w.stopProcessCh:
-					return
 				default:
 				}
 			}
@@ -1028,16 +1032,20 @@ func (w *worker) makeCurrent(reorg bool, parent *types.Block, header *types.Head
 			return err
 		}
 
+		rCopy := make([]*types.Receipt, w.refCache.Tcount)
+		copy(rCopy, w.refCache.Receipts)
+		txCopy := make([]*types.Transaction, w.refCache.Tcount)
+		copy(txCopy, w.refCache.Txs)
 		env = &environment{
 			signer:       types.MakeSigner(w.config, header.Number),
-			state:        w.refCache.State,
+			state:        w.refCache.State.Copy(),
 			ancestors:    mapset.NewSet(),
 			family:       mapset.NewSet(),
 			uncles:       mapset.NewSet(),
 			header:       header,
 			privateState: privateState,
-			receipts:     w.refCache.Receipts,
-			txs:          w.refCache.Txs,
+			receipts:     rCopy,
+			txs:          txCopy,
 			tcount:       w.refCache.Tcount,
 		}
 		w.refCacheMu.RUnlock()

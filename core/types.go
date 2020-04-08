@@ -42,5 +42,5 @@ type Validator interface {
 // of gas used in the process and return an error if any of the internal rules
 // failed.
 type Processor interface {
-	Process(block *types.Block, foreignData map[uint64]*types.DataCache, corssShardTxs map[uint64]types.CrossShardTxs, start, end uint64, statedb, privateState *state.StateDB, cfg vm.Config) (types.Receipts, types.Receipts, []*types.Log, uint64, error)
+	Process(block *types.Block, start, end uint64, statedb, privateState *state.StateDB, cfg vm.Config) (types.Receipts, types.Receipts, []*types.Log, uint64, error)
 }

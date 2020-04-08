@@ -54,8 +54,7 @@ func NewStateProcessor(config *params.ChainConfig, bc *BlockChain, engine consen
 // Process returns the receipts and logs accumulated during the process and
 // returns the amount of gas that was used in the process. If any of the
 // transactions failed to execute due to insufficient gas it will return an error.
-func (p *StateProcessor) Process(block *types.Block, foreignData map[uint64]*types.DataCache,
-	pendingCrossTxs map[uint64]types.CrossShardTxs, start, end uint64, statedb, privateState *state.StateDB, cfg vm.Config) (types.Receipts, types.Receipts, []*types.Log, uint64, error) {
+func (p *StateProcessor) Process(block *types.Block, start, end uint64, statedb, privateState *state.StateDB, cfg vm.Config) (types.Receipts, types.Receipts, []*types.Log, uint64, error) {
 
 	var (
 		receipts types.Receipts
@@ -85,18 +84,20 @@ func (p *StateProcessor) Process(block *types.Block, foreignData map[uint64]*typ
 		} else {
 			for curr <= end {
 				found := false
-				for _, ctx := range pendingCrossTxs[curr].Txs {
+				// @sourav, todo: Add locks for pendingCrossTxs map
+				for _, ctx := range p.bc.pendingCrossTxs[curr].Txs {
 					if tx.Hash() == ctx.Tx.Hash() {
-						dc = foreignData[curr]
+						p.bc.foreignDataMu.RLock()
+						dc = p.bc.foreignData[curr]
+						p.bc.foreignDataMu.RUnlock()
 						found = true
-						log.Info("@ds transaction found ", "hash", tx.Hash(), "refNum", curr)
+						log.Debug("Cross shard Transaction with", "hash", tx.Hash(), "refNum", curr)
 						break
 					}
 				}
 				if found {
 					break
 				}
-				log.Info("@ds stuck in loop")
 				curr++
 			}
 		}
