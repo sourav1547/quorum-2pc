@@ -24,7 +24,7 @@ import (
 // Start implements core.Engine.Start
 func (c *core) Start() error {
 	// Start a new round from last sequence + 1
-	c.startNewRound(common.Big0, false)
+	c.startNewRound(common.Big0)
 
 	// Tests will handle events itself, so we have to make subscribeEvents()
 	// be able to call in test.
@@ -119,9 +119,9 @@ func (c *core) handleEvents() {
 			if !ok {
 				return
 			}
-			switch ev := event.Data.(type) {
+			switch event.Data.(type) {
 			case istanbul.FinalCommittedEvent:
-				c.handleFinalCommitted(ev.Reorg)
+				c.handleFinalCommitted()
 			}
 		}
 	}
@@ -195,7 +195,7 @@ func (c *core) handleTimeoutMsg() {
 	lastProposal, _ := c.backend.LastProposal()
 	if lastProposal != nil && lastProposal.Number().Cmp(c.current.Sequence()) >= 0 {
 		c.logger.Trace("round change timeout, catch up latest sequence", "number", lastProposal.Number().Uint64())
-		c.startNewRound(common.Big0, false)
+		c.startNewRound(common.Big0)
 	} else {
 		c.sendNextRoundChange()
 	}

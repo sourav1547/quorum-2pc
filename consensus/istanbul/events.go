@@ -28,5 +28,4 @@ type MessageEvent struct {
 
 // FinalCommittedEvent is posted when a proposal is committed
 type FinalCommittedEvent struct {
-	Reorg bool
 }

@@ -217,7 +217,7 @@ func (c *core) commit() {
 
 // startNewRound starts a new round. if round equals to 0, it means to starts a new sequence
 // @sourav, todo: potential starting point.
-func (c *core) startNewRound(round *big.Int, reorg bool) {
+func (c *core) startNewRound(round *big.Int) {
 	var logger log.Logger
 	if c.current == nil {
 		logger = c.logger.New("old_round", -1, "old_seq", 0)
@@ -230,7 +230,7 @@ func (c *core) startNewRound(round *big.Int, reorg bool) {
 	lastProposal, lastProposer := c.backend.LastProposal()
 	if c.current == nil {
 		logger.Trace("Start to the initial round")
-	} else if (lastProposal.Number().Cmp(c.current.Sequence()) >= 0) || reorg {
+	} else if lastProposal.Number().Cmp(c.current.Sequence()) >= 0 {
 		diff := new(big.Int).Sub(lastProposal.Number(), c.current.Sequence())
 		c.sequenceMeter.Mark(new(big.Int).Add(diff, common.Big1).Int64())
 
@@ -291,7 +291,7 @@ func (c *core) startNewRound(round *big.Int, reorg bool) {
 	}
 	c.newRoundChangeTimer()
 
-	logger.Info("New round", "new_round", newView.Round, "new_seq", newView.Sequence, "new_proposer", c.valSet.GetProposer(), "valSet", c.valSet.List(), "size", c.valSet.Size(), "IsProposer", c.IsProposer())
+	logger.Debug("New round", "new_round", newView.Round, "new_seq", newView.Sequence, "new_proposer", c.valSet.GetProposer(), "valSet", c.valSet.List(), "size", c.valSet.Size(), "IsProposer", c.IsProposer())
 }
 
 func (c *core) catchUpRound(view *istanbul.View) {

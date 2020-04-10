@@ -136,14 +136,12 @@ func (sb *backend) SetBroadcaster(broadcaster consensus.Broadcaster) {
 	sb.broadcaster = broadcaster
 }
 
-func (sb *backend) NewChainHead(reorg bool) error {
+func (sb *backend) NewChainHead() error {
 	sb.coreMu.RLock()
 	defer sb.coreMu.RUnlock()
 	if !sb.coreStarted {
 		return istanbul.ErrStoppedEngine
 	}
-	go sb.istanbulEventMux.Post(istanbul.FinalCommittedEvent{
-		Reorg: reorg,
-	})
+	go sb.istanbulEventMux.Post(istanbul.FinalCommittedEvent{})
 	return nil
 }
