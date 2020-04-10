@@ -208,9 +208,7 @@ func (c *core) commit() {
 		}
 
 		if err := c.backend.Commit(proposal, committedSeals); err != nil {
-			if c.myShard == uint64(0) {
-				c.current.UnlockHash() //Unlock block when insertion fails
-			}
+			c.current.UnlockHash() //Unlock block when insertion fails
 			c.sendNextRoundChange()
 			return
 		}
@@ -282,7 +280,7 @@ func (c *core) startNewRound(round *big.Int, reorg bool) {
 	if roundChange && c.IsProposer() && c.current != nil {
 		// If it is locked, propose the old proposal
 		// If we have pending request, propose pending request
-		if c.myShard == uint64(0) && c.current.IsHashLocked() {
+		if c.current.IsHashLocked() {
 			r := &istanbul.Request{
 				Proposal: c.current.Proposal(), //c.current.Proposal would be the locked proposal by previous proposer, see updateRoundState
 			}
@@ -316,7 +314,7 @@ func (c *core) catchUpRound(view *istanbul.View) {
 func (c *core) updateRoundState(view *istanbul.View, validatorSet istanbul.ValidatorSet, roundChange bool) {
 	// Lock only if both roundChange is true and it is locked
 	if roundChange && c.current != nil {
-		if c.myShard == uint64(0) && c.current.IsHashLocked() {
+		if c.current.IsHashLocked() {
 			c.current = newRoundState(view, validatorSet, c.current.GetLockedHash(), c.current.Preprepare, c.current.pendingRequest, c.backend.HasBadProposal)
 		} else {
 			c.current = newRoundState(view, validatorSet, common.Hash{}, nil, c.current.pendingRequest, c.backend.HasBadProposal)
@@ -375,16 +373,10 @@ func (c *core) checkValidatorSignature(data []byte, sig []byte) (common.Address,
 func (c *core) QuorumSize() int {
 	if c.config.Ceil2Nby3Block == nil || (c.current != nil && c.current.sequence.Cmp(c.config.Ceil2Nby3Block) < 0) {
 		c.logger.Trace("Confirmation Formula used 2F+ 1")
-		if c.myShard == uint64(0) {
-			return (2 * c.valSet.F()) + 1
-		}
-		return c.valSet.F() + 1
+		return (2 * c.valSet.F()) + 1
 	}
 	c.logger.Trace("Confirmation Formula used ceil(2N/3)")
-	if c.myShard == uint64(0) {
-		return int(math.Ceil(float64(2*c.valSet.Size()) / 3))
-	}
-	return int(math.Ceil(float64(c.valSet.Size()) / 2))
+	return int(math.Ceil(float64(2*c.valSet.Size()) / 3))
 }
 
 // PrepareCommittedSeal returns a committed seal for the given hash
