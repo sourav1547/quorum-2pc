@@ -37,12 +37,13 @@ import (
 
 // Various transaction Type
 const (
-	StateCommit     = uint64(0) // State Commitment Transaction
+	TxnStatus       = uint64(0) // Commitment status of a cross-shard Transaction
 	IntraShard      = uint64(1) // Intra Shard Transaction
 	CrossShard      = uint64(2) // Cross Shard Transaction
 	ContractInit    = uint64(3) // Initializing Contracts
 	CrossShardLocal = uint64(4) // Cross shard transaction for local execution.
-	Others          = uint64(5)
+	LocalDecision   = uint64(5)
+	Others          = uint64(6)
 )
 
 var (
@@ -541,117 +542,74 @@ type CData struct {
 	Data    map[common.Hash]common.Hash
 }
 
-// CrossTx structure type of cross shard transactions
-type CrossTx struct {
-	Shards       []uint64
-	BlockNum     *big.Int
-	Tx           *Transaction
-	AllContracts map[uint64][]CKeys // shard: list of contracts and addresses
-}
-
-// SetTransaction sets the transaction
-func (ctx *CrossTx) SetTransaction(tx *Transaction) {
-	ctx.Tx = &Transaction{data: tx.TxData()}
-}
-
-// CrossShardTxs stores index:txn for any given block
-type CrossShardTxs struct {
-	Lock sync.RWMutex
-	Txs  map[uint64]*CrossTx // index:transaction
-}
-
-// NewCrossShardTxs for some block number
-func NewCrossShardTxs() CrossShardTxs {
-	return CrossShardTxs{
-		Txs: make(map[uint64]*CrossTx),
-	}
-}
-
-// TxCount retuns number of elements
-func (cst CrossShardTxs) TxCount() int {
-	cst.Lock.RLock()
-	defer cst.Lock.RUnlock()
-	return len(cst.Txs)
-}
-
-// AddTransaction to add a cross shard transaction
-func (cst CrossShardTxs) AddTransaction(index uint64, tx *CrossTx) {
-	cst.Lock.Lock()
-	cst.Txs[index] = tx
-	cst.Lock.Unlock()
-}
-
-// Commitment of a particular shard
-type Commitment struct {
+// TCommit of a cross-shard transaction
+type TCommit struct {
+	TxHash    common.Hash
 	Shard     uint64
-	BlockNum  uint64
-	RefNum    uint64
+	Status    bool
 	StateRoot common.Hash
 }
 
-// Update commitment contents
-func (cmt *Commitment) Update(blockNum, refNum uint64, root common.Hash) {
-	cmt.BlockNum = blockNum
-	cmt.RefNum = refNum
-	cmt.StateRoot = root
-}
-
-// Commitments of all the shards
-type Commitments struct {
+// TCommits to store commitments of a cross-shard transaction
+type TCommits struct {
 	Lock    sync.RWMutex
-	Commits map[uint64]*Commitment // shard:commitment (if any)
+	Commits map[uint64]*TCommit // shard:commit
 }
 
-// NewCommitments creates a new commitments
-func NewCommitments() *Commitments {
-	return &Commitments{
-		Commits: make(map[uint64]*Commitment),
+// NewTCommits create a new commitments
+func NewTCommits() *TCommits {
+	return &TCommits{
+		Commits: make(map[uint64]*TCommit),
 	}
 }
 
 // AddCommit adds a commit for some particular shard
-func (cm *Commitments) AddCommit(shard uint64, commit *Commitment) {
-	cm.Lock.Lock()
-	defer cm.Lock.Unlock()
-	cm.Commits[shard] = commit
+func (tcs *TCommits) AddCommit(shard uint64, commit *TCommit) {
+	tcs.Lock.Lock()
+	defer tcs.Lock.Unlock()
+	if _, ok := tcs.Commits[shard]; !ok {
+		tcs.Commits[shard] = commit
+	}
 }
 
 // GetCommit returns commitment of a shard
-func (cm *Commitments) GetCommit(shard uint64) *Commitment {
-	cm.Lock.RLock()
-	defer cm.Lock.RUnlock()
-	return cm.Commits[shard]
+func (tcs *TCommits) GetCommit(shard uint64) *TCommit {
+	tcs.Lock.RLock()
+	defer tcs.Lock.RUnlock()
+	return tcs.Commits[shard]
 }
 
-// CopyCommits accross reference numbers
-func (cm *Commitments) CopyCommits(numShard uint64, commits *Commitments) {
-	cm.Lock.Lock()
-	defer cm.Lock.Unlock()
-	for shard := uint64(1); shard < numShard; shard++ {
-		commit := commits.GetCommit(shard)
-		cm.Commits[shard] = &Commitment{
-			RefNum:    commit.RefNum,
-			StateRoot: commit.StateRoot,
-			BlockNum:  commit.BlockNum,
-			Shard:     shard,
-		}
+// CrossTx is a object from cross-shard  Transaction
+type CrossTx struct {
+	Shards       []uint64
+	BlockNum     *big.Int
+	Tx           *Transaction
+	AllContracts map[uint64][]CKeys
+}
+
+func (ctx *CrossTx) SetTransaction(tx *Transaction) {
+	ctx.Tx = &Transaction{data: tx.TxData()}
+}
+
+// CLock stores currently locked keys of a contract
+type CLock struct {
+	Addr    common.Address
+	ClockMu sync.RWMutex
+	Keys    map[common.Hash]bool
+}
+
+// NewCLock returns a new lock object
+func NewCLock(addr common.Address) *CLock {
+	return &CLock{
+		Addr: addr,
+		Keys: make(map[common.Hash]bool),
 	}
 }
 
-// CommitNum fetches commitnumber of shard
-func (cm *Commitments) CommitNum(shard uint64) uint64 {
-	cm.Lock.RLock()
-	defer cm.Lock.RUnlock()
-	if commit, ok := cm.Commits[shard]; ok {
-		return commit.BlockNum
-	}
-	log.Warn("Commitment not found for", "shard", shard)
-	return uint64(0)
-}
-
-// DataCache stores foreign data for one block
-type DataCache struct {
-	DataCacheMu sync.RWMutex
+// TxControl stores foreign data for one block
+type TxControl struct {
+	TxControlMu sync.RWMutex
+	Tx          *Transaction
 	RefNum      uint64
 	Status      bool
 	Required    int
@@ -659,30 +617,30 @@ type DataCache struct {
 	Keyval      map[common.Address]*CKeys // list of (k,v) pairs for each contract
 	AddrToShard map[common.Address]uint64 // addr to shard mapping
 	ShardStatus map[uint64]bool           // shard to its status mapping
-	Commits     map[uint64]*Commitment    // Corresponding commit
+	Commits     *TCommits                 // Corresponding commit
 	Values      map[common.Address]*CData // key-value pair per contract
 }
 
-// NewDataCache creates a new datacache
-func NewDataCache(bnum uint64, status bool) *DataCache {
-	return &DataCache{
-		RefNum:      bnum,
+// NewTxControl creates a new datacache
+func NewTxControl(rNum uint64, status bool) *TxControl {
+	return &TxControl{
+		RefNum:      rNum,
 		Status:      status,
 		Required:    0,
 		Received:    0,
 		Keyval:      make(map[common.Address]*CKeys),
 		AddrToShard: make(map[common.Address]uint64),
 		ShardStatus: make(map[uint64]bool),
-		Commits:     make(map[uint64]*Commitment),
+		Commits:     NewTCommits(),
 		Values:      make(map[common.Address]*CData),
 	}
 }
 
 // AddData adds data corresponding to keys
-func (dc *DataCache) AddData(shard uint64, vals []*KeyVal) {
-	dc.DataCacheMu.Lock()
-	defer dc.DataCacheMu.Unlock()
-	if !dc.ShardStatus[shard] {
+func (tcb *TxControl) AddData(shard uint64, vals []*KeyVal) {
+	tcb.TxControlMu.Lock()
+	defer tcb.TxControlMu.Unlock()
+	if !tcb.ShardStatus[shard] {
 		for _, values := range vals {
 			caddr := values.Addr
 			cdata := &CData{
@@ -694,63 +652,54 @@ func (dc *DataCache) AddData(shard uint64, vals []*KeyVal) {
 
 			data := values.Data
 			lenData := len(data)
-			keys := dc.Keyval[caddr].Keys
+			keys := tcb.Keyval[caddr].Keys
 			for i := 0; i < lenData; i++ {
 				key := keys[i]
 				val := data[i]
 				cdata.Data[key] = val
 			}
-			dc.Values[caddr] = cdata
-			log.Info("@ds adding data for", "addr", dc.Values[caddr].Addr, "bal", dc.Values[caddr].Nonce)
+			tcb.Values[caddr] = cdata
+			log.Info("@ds adding data for", "addr", tcb.Values[caddr].Addr, "bal", tcb.Values[caddr].Nonce)
 		}
-		dc.ShardStatus[shard] = true
-		dc.Received++
-		if dc.Received == dc.Required {
-			dc.Status = true
+		tcb.ShardStatus[shard] = true
+		tcb.Received++
+		if tcb.Received == tcb.Required {
+			tcb.Status = true
 		}
 	}
 }
 
-// InitKeys adds transaction detail
-func (dc *DataCache) InitKeys(myshard uint64, ctxs CrossShardTxs, commits *Commitments) {
-	var present bool
-	dc.DataCacheMu.Lock()
-	defer dc.DataCacheMu.Unlock()
-	dc.Received = 0
-	dc.Required = 0
-	for _, ctx := range ctxs.Txs {
-		present = false
-		for _, shard := range ctx.Shards {
-			if shard == myshard {
-				present = true
-				break
-			}
+// InitTxControl adds transaction detail
+func (tcb *TxControl) InitTxControl(myshard uint64, ctx *CrossTx) {
+	tcb.TxControlMu.Lock()
+	defer tcb.TxControlMu.Unlock()
+	tcb.Received = 0
+	tcb.Required = 0
+	tcb.Tx = ctx.Tx
+
+	for shard, allKeys := range ctx.AllContracts {
+		if _, ok := tcb.ShardStatus[shard]; !ok {
+			tcb.Required++
+			tcb.ShardStatus[shard] = false
 		}
-		if present {
-			for shard, allKeys := range ctx.AllContracts {
-				if _, ok := dc.ShardStatus[shard]; !ok {
-					if shard == myshard {
-						dc.ShardStatus[shard] = true
-					} else {
-						dc.Required++
-						dc.ShardStatus[shard] = false
-						dc.Commits[shard] = commits.GetCommit(shard)
-					}
-				}
-				for _, contract := range allKeys {
-					caddr := contract.Addr
-					if _, cok := dc.AddrToShard[caddr]; !cok {
-						dc.AddrToShard[caddr] = shard
-						dc.Keyval[caddr] = &CKeys{Addr: caddr}
-						log.Info("@ds adding keys to KeyVal", "addr", caddr, "shard", shard)
-					}
-					for _, key := range contract.Keys {
-						dc.Keyval[caddr].AddKey(key)
-					}
-				}
+		for _, contract := range allKeys {
+			caddr := contract.Addr
+			if _, cok := tcb.AddrToShard[caddr]; !cok {
+				tcb.AddrToShard[caddr] = shard
+				tcb.Keyval[caddr] = &CKeys{Addr: caddr}
+				log.Info("@ds adding keys to KeyVal", "addr", caddr, "shard", shard)
+			}
+			for _, key := range contract.Keys {
+				tcb.Keyval[caddr].AddKey(key)
 			}
 		}
 	}
+}
+
+// AddTCommit adds commitment for a transaction
+func (tcb *TxControl) AddTCommit(commit *TCommit) {
+	shard := commit.Shard
+	tcb.Commits.AddCommit(shard, commit)
 }
 
 // Message is a fully derived transaction and implements core.Message

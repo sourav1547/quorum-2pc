@@ -87,12 +87,12 @@ func GetHashFn(ref *types.Header, chain ChainContext) func(n uint64) common.Hash
 
 // CanTransfer checks whether there are enough funds in the address' account to make a transfer.
 // This does not take the necessary gas in to account to make the transfer valid.
-func CanTransfer(dc *types.DataCache, bshard uint64, db vm.StateDB, addr common.Address, amount *big.Int) bool {
+func CanTransfer(tcb *types.TxControl, bshard uint64, db vm.StateDB, addr common.Address, amount *big.Int) bool {
 	var balance *big.Int
-	if dc != nil {
-		shard := dc.AddrToShard[addr]
+	if tcb != nil {
+		shard := tcb.AddrToShard[addr]
 		if shard != bshard {
-			balance = new(big.Int).SetUint64(dc.Values[addr].Balance)
+			balance = new(big.Int).SetUint64(tcb.Values[addr].Balance)
 		} else {
 			balance = db.GetBalance(addr)
 		}
@@ -102,36 +102,36 @@ func CanTransfer(dc *types.DataCache, bshard uint64, db vm.StateDB, addr common.
 }
 
 // Transfer subtracts amount from sender and adds amount to recipient using the given Db
-func Transfer(bshard uint64, dc *types.DataCache, dcChanges map[common.Address]*types.CData, db vm.StateDB, sender, recipient common.Address, amount *big.Int) {
-	if dc != nil {
-		sshard := dc.AddrToShard[sender]
+func Transfer(bshard uint64, tcb *types.TxControl, tcbChanges map[common.Address]*types.CData, db vm.StateDB, sender, recipient common.Address, amount *big.Int) {
+	if tcb != nil {
+		sshard := tcb.AddrToShard[sender]
 		if sshard != bshard {
-			if _, ok := dcChanges[sender]; !ok {
-				vals := dc.Values[sender]
-				dcChanges[sender] = &types.CData{
+			if _, ok := tcbChanges[sender]; !ok {
+				vals := tcb.Values[sender]
+				tcbChanges[sender] = &types.CData{
 					Addr:    sender,
 					Balance: vals.Balance,
 					Nonce:   vals.Nonce,
 					Data:    make(map[common.Hash]common.Hash),
 				}
 			}
-			dcChanges[sender].Balance = dcChanges[sender].Balance - amount.Uint64()
+			tcbChanges[sender].Balance = tcbChanges[sender].Balance - amount.Uint64()
 		} else {
 			db.SubBalance(sender, amount)
 		}
 
-		rshard := dc.AddrToShard[recipient]
+		rshard := tcb.AddrToShard[recipient]
 		if rshard != bshard {
-			if _, ok := dcChanges[recipient]; !ok {
-				vals := dc.Values[recipient]
-				dcChanges[recipient] = &types.CData{
+			if _, ok := tcbChanges[recipient]; !ok {
+				vals := tcb.Values[recipient]
+				tcbChanges[recipient] = &types.CData{
 					Addr:    recipient,
 					Balance: vals.Balance,
 					Nonce:   vals.Nonce,
 					Data:    make(map[common.Hash]common.Hash),
 				}
 			}
-			dcChanges[recipient].Balance = dcChanges[recipient].Balance + amount.Uint64()
+			tcbChanges[recipient].Balance = tcbChanges[recipient].Balance + amount.Uint64()
 		} else {
 			db.AddBalance(recipient, amount)
 		}

@@ -46,9 +46,9 @@ var emptyCodeHash = crypto.Keccak256Hash(nil)
 
 type (
 	// CanTransferFunc is the signature of a transfer guard function
-	CanTransferFunc func(*types.DataCache, uint64, StateDB, common.Address, *big.Int) bool
+	CanTransferFunc func(*types.TxControl, uint64, StateDB, common.Address, *big.Int) bool
 	// TransferFunc is the signature of a transfer function
-	TransferFunc func(uint64, *types.DataCache, map[common.Address]*types.CData, StateDB, common.Address, common.Address, *big.Int)
+	TransferFunc func(uint64, *types.TxControl, map[common.Address]*types.CData, StateDB, common.Address, common.Address, *big.Int)
 	// GetHashFunc returns the nth block hash in the blockchain
 	// and is used by the BLOCKHASH EVM op code.
 	GetHashFunc func(uint64) common.Hash
@@ -125,8 +125,8 @@ type EVM struct {
 	// Context provides auxiliary blockchain related information
 	Context
 	// DC stores foreign data
-	dc        *types.DataCache
-	dcChanges map[common.Address]*types.CData
+	tcb        *types.TxControl
+	tcbChanges map[common.Address]*types.CData
 	// StateDB gives access to the underlying state
 	StateDB StateDB
 	// Depth is the current call stack
@@ -164,11 +164,11 @@ type EVM struct {
 
 // NewEVM returns a new EVM. The returned EVM is not thread safe and should
 // only ever be used *once*.
-func NewEVM(ctx Context, dc *types.DataCache, statedb, privateState StateDB, chainConfig *params.ChainConfig, vmConfig Config) *EVM {
+func NewEVM(ctx Context, tcb *types.TxControl, statedb, privateState StateDB, chainConfig *params.ChainConfig, vmConfig Config) *EVM {
 	evm := &EVM{
 		Context:      ctx,
-		dc:           dc,
-		dcChanges:    make(map[common.Address]*types.CData),
+		tcb:          tcb,
+		tcbChanges:   make(map[common.Address]*types.CData),
 		StateDB:      statedb,
 		vmConfig:     vmConfig,
 		chainConfig:  chainConfig,
@@ -238,7 +238,7 @@ func (evm *EVM) Call(caller ContractRef, addr common.Address, input []byte, gas 
 		return nil, gas, ErrDepth
 	}
 	// Fail if we're trying to transfer more than the available balance
-	if !evm.Context.CanTransfer(evm.dc, evm.Context.Shard, evm.StateDB, caller.Address(), value) {
+	if !evm.Context.CanTransfer(evm.tcb, evm.Context.Shard, evm.StateDB, caller.Address(), value) {
 		return nil, gas, ErrInsufficientBalance
 	}
 
@@ -281,10 +281,10 @@ func (evm *EVM) Call(caller ContractRef, addr common.Address, input []byte, gas 
 			if evm.quorumReadOnly {
 				return nil, gas, ErrReadOnlyValueTransfer
 			}
-			evm.Transfer(evm.Context.Shard, evm.dc, evm.dcChanges, evm.StateDB, caller.Address(), to.Address(), value)
+			evm.Transfer(evm.Context.Shard, evm.tcb, evm.tcbChanges, evm.StateDB, caller.Address(), to.Address(), value)
 		}
 	} else {
-		evm.Transfer(evm.Context.Shard, evm.dc, evm.dcChanges, evm.StateDB, caller.Address(), to.Address(), value)
+		evm.Transfer(evm.Context.Shard, evm.tcb, evm.tcbChanges, evm.StateDB, caller.Address(), to.Address(), value)
 	}
 
 	// if evm.Context.Shard > uint64(0) {
@@ -353,7 +353,7 @@ func (evm *EVM) CallCode(caller ContractRef, addr common.Address, input []byte, 
 		return nil, gas, ErrDepth
 	}
 	// Fail if we're trying to transfer more than the available balance
-	if !evm.CanTransfer(evm.dc, evm.Context.Shard, evm.StateDB, caller.Address(), value) {
+	if !evm.CanTransfer(evm.tcb, evm.Context.Shard, evm.StateDB, caller.Address(), value) {
 		return nil, gas, ErrInsufficientBalance
 	}
 
@@ -471,7 +471,7 @@ func (evm *EVM) create(caller ContractRef, codeAndHash *codeAndHash, gas uint64,
 	if evm.depth > int(params.CallCreateDepth) {
 		return nil, common.Address{}, gas, ErrDepth
 	}
-	if !evm.CanTransfer(evm.dc, evm.Context.Shard, evm.StateDB, caller.Address(), value) {
+	if !evm.CanTransfer(evm.tcb, evm.Context.Shard, evm.StateDB, caller.Address(), value) {
 		return nil, common.Address{}, gas, ErrInsufficientBalance
 	}
 
@@ -511,10 +511,10 @@ func (evm *EVM) create(caller ContractRef, codeAndHash *codeAndHash, gas uint64,
 			if evm.quorumReadOnly {
 				return nil, common.Address{}, gas, ErrReadOnlyValueTransfer
 			}
-			evm.Transfer(evm.Context.Shard, evm.dc, evm.dcChanges, evm.StateDB, caller.Address(), address, value)
+			evm.Transfer(evm.Context.Shard, evm.tcb, evm.tcbChanges, evm.StateDB, caller.Address(), address, value)
 		}
 	} else {
-		evm.Transfer(evm.Context.Shard, evm.dc, evm.dcChanges, evm.StateDB, caller.Address(), address, value)
+		evm.Transfer(evm.Context.Shard, evm.tcb, evm.tcbChanges, evm.StateDB, caller.Address(), address, value)
 	}
 
 	// initialise a new contract and set the code that is to be used by the
@@ -615,26 +615,26 @@ func (evm *EVM) Create2(caller ContractRef, code []byte, gas uint64, endowment *
 func (evm *EVM) ChainConfig() *params.ChainConfig { return evm.chainConfig }
 
 func getBalance(env *EVM, addr common.Address) (*big.Int, error) {
-	if env.dc != nil {
+	if env.tcb != nil {
 		var (
 			shard uint64
 			sok   bool
 		)
-		if shard, sok = env.dc.AddrToShard[addr]; !sok {
+		if shard, sok = env.tcb.AddrToShard[addr]; !sok {
 			log.Debug("@ds returning balance ErrAddressNotFound")
 			return nil, ErrAddressNotFound
 		}
 		if shard != env.Context.Shard {
-			if _, ok := env.dcChanges[addr]; !ok {
-				vals := env.dc.Values[addr]
-				env.dcChanges[addr] = &types.CData{
+			if _, ok := env.tcbChanges[addr]; !ok {
+				vals := env.tcb.Values[addr]
+				env.tcbChanges[addr] = &types.CData{
 					Addr:    addr,
 					Balance: vals.Balance,
 					Nonce:   vals.Nonce,
 					Data:    make(map[common.Hash]common.Hash),
 				}
 			}
-			balance := env.dcChanges[addr].Balance
+			balance := env.tcbChanges[addr].Balance
 			log.Debug("@ds returning balance from cache", "addr", addr, "bal", balance)
 			return new(big.Int).SetUint64(balance), nil
 		}
@@ -642,64 +642,64 @@ func getBalance(env *EVM, addr common.Address) (*big.Int, error) {
 	state := getDualState(env, addr)
 	balance := state.GetBalance(addr).Uint64()
 	if env.Context.Shard > uint64(0) {
-		log.Debug("@ds returning balance from state", "dc", env.dc, "addr", addr, "balance", balance)
+		log.Debug("@ds returning balance from state", "dc", env.tcb, "addr", addr, "balance", balance)
 	}
 	return state.GetBalance(addr), nil
 }
 
 func setState(env *EVM, addr common.Address, loc, val common.Hash) error {
-	if env.dc != nil {
+	if env.tcb != nil {
 		var (
 			shard uint64
 			sok   bool
 		)
-		if shard, sok = env.dc.AddrToShard[addr]; !sok {
+		if shard, sok = env.tcb.AddrToShard[addr]; !sok {
 			log.Debug("@ds setState ErrAddressNotFound")
 			return ErrAddressNotFound
 		}
 		if shard != env.Context.Shard {
-			if _, ok := env.dcChanges[addr]; !ok {
-				vals := env.dc.Values[addr]
-				env.dcChanges[addr] = &types.CData{
+			if _, ok := env.tcbChanges[addr]; !ok {
+				vals := env.tcb.Values[addr]
+				env.tcbChanges[addr] = &types.CData{
 					Addr:    addr,
 					Balance: vals.Balance,
 					Nonce:   vals.Nonce,
 					Data:    make(map[common.Hash]common.Hash),
 				}
 			}
-			env.dcChanges[addr].Data[loc] = val
+			env.tcbChanges[addr].Data[loc] = val
 			log.Debug("@ds updating state in cache ", "addr", addr, "loc", loc, "val", val)
 			return nil
 		}
 	}
 	if env.Context.Shard > uint64(0) {
-		log.Debug("@ds updating state in state", "dc", env.dc, "addr", addr, "loc", loc, "val", val)
+		log.Debug("@ds updating state in state", "dc", env.tcb, "addr", addr, "loc", loc, "val", val)
 	}
 	getDualState(env, addr).SetState(addr, loc, val)
 	return nil
 }
 
 func getStateAt(env *EVM, addr common.Address, loc common.Hash) (common.Hash, error) {
-	if env.dc != nil {
+	if env.tcb != nil {
 		var (
 			shard uint64
 			sok   bool
 		)
-		if shard, sok = env.dc.AddrToShard[addr]; !sok {
+		if shard, sok = env.tcb.AddrToShard[addr]; !sok {
 			log.Debug("@ds returning 1 ErrAddressNotFound")
 			return common.Hash{}, ErrAddressNotFound
 		}
 		if shard != env.Context.Shard {
-			if _, ok := env.dcChanges[addr]; !ok {
-				vals := env.dc.Values[addr]
-				env.dcChanges[addr] = &types.CData{
+			if _, ok := env.tcbChanges[addr]; !ok {
+				vals := env.tcb.Values[addr]
+				env.tcbChanges[addr] = &types.CData{
 					Addr:    addr,
 					Balance: vals.Balance,
 					Nonce:   vals.Nonce,
 					Data:    make(map[common.Hash]common.Hash),
 				}
 			}
-			val := env.dcChanges[addr].Data[loc]
+			val := env.tcbChanges[addr].Data[loc]
 			log.Debug("@ds returning state from cache", "addr", addr, "loc", loc, "val", val)
 			return val, nil
 		}
@@ -707,7 +707,7 @@ func getStateAt(env *EVM, addr common.Address, loc common.Hash) (common.Hash, er
 	state := getDualState(env, addr)
 	val := state.GetState(addr, loc)
 	if env.Context.Shard > uint64(0) {
-		log.Debug("@ds returning state from state", "dc", env.dc, "addr", addr, "loc", loc, "val", val)
+		log.Debug("@ds returning state from state", "dc", env.tcb, "addr", addr, "loc", loc, "val", val)
 	}
 	return val, nil
 }
@@ -728,7 +728,7 @@ func getDualState(env *EVM, addr common.Address) StateDB {
 }
 
 func (env *EVM) PublicState() PublicState   { return env.publicState }
-func (env *EVM) DC() *types.DataCache       { return env.dc }
+func (env *EVM) Tcb() *types.TxControl      { return env.tcb }
 func (env *EVM) PrivateState() PrivateState { return env.privateState }
 func (env *EVM) Push(statedb StateDB) {
 	// Quorum : the read only depth to be set up only once for the entire

@@ -17,8 +17,6 @@
 package eth
 
 import (
-	"encoding/binary"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -100,8 +98,8 @@ type ProtocolManager struct {
 	shardAddMap     map[uint64]*big.Int
 	shardAddMapLock sync.RWMutex
 
-	foreignData   map[uint64]*types.DataCache
-	foreignDataMu sync.RWMutex
+	// foreignData   map[common.Hash]*types.DataCache
+	// foreignDataMu sync.RWMutex
 
 	SubProtocols []p2p.Protocol
 
@@ -129,7 +127,7 @@ type ProtocolManager struct {
 
 // NewProtocolManager returns a new Ethereum sub protocol manager. The Ethereum sub protocol manages peers capable
 // with the Ethereum network.
-func NewProtocolManager(config *params.ChainConfig, mode downloader.SyncMode, numShard, myshard, networkID uint64, mux, rmux *event.TypeMux, txpool txPool, engine consensus.Engine, blockchain, refchain *core.BlockChain, refAddress common.Address, shardAddMap map[uint64]*big.Int, foreignData map[uint64]*types.DataCache, foreignDataMu sync.RWMutex, chaindb, refdb ethdb.Database, raftMode bool) (*ProtocolManager, error) {
+func NewProtocolManager(config *params.ChainConfig, mode downloader.SyncMode, numShard, myshard, networkID uint64, mux, rmux *event.TypeMux, txpool txPool, engine consensus.Engine, blockchain, refchain *core.BlockChain, refAddress common.Address, shardAddMap map[uint64]*big.Int, chaindb, refdb ethdb.Database, raftMode bool) (*ProtocolManager, error) {
 	// Create the protocol manager with the base fields
 	manager := &ProtocolManager{
 		numShard:      numShard,
@@ -146,15 +144,15 @@ func NewProtocolManager(config *params.ChainConfig, mode downloader.SyncMode, nu
 		chainconfig:   config,
 		cousinPeers:   make(map[uint64]*peerSet),
 		shardAddMap:   make(map[uint64]*big.Int),
-		foreignData:   foreignData,
-		foreignDataMu: foreignDataMu,
-		newPeerCh:     make(chan *peer),
-		noMorePeers:   make(chan struct{}),
-		txsyncCh:      make(chan *txsync),
-		quitSync:      make(chan struct{}),
-		rQuitSync:     make(chan struct{}),
-		raftMode:      raftMode,
-		engine:        engine,
+		// foreignData:   foreignData,
+		// foreignDataMu: foreignDataMu,
+		newPeerCh:   make(chan *peer),
+		noMorePeers: make(chan struct{}),
+		txsyncCh:    make(chan *txsync),
+		quitSync:    make(chan struct{}),
+		rQuitSync:   make(chan struct{}),
+		raftMode:    raftMode,
+		engine:      engine,
 	}
 
 	// manager.shardAddMapLock.Lock()
@@ -314,7 +312,7 @@ func (pm *ProtocolManager) Start(maxPeers int) {
 		pm.minedBlockSub = pm.eventMux.Subscribe(core.NewMinedBlockEvent{})
 		pm.refBlockSub = pm.eventMux.Subscribe(core.NewRefBlockEvent{})
 		go pm.minedBroadcastLoop()
-		go pm.fetchForeignDataLoop()
+		// go pm.fetchForeignDataLoop()
 	} else {
 		// We set this immediately in raft mode to make sure the miner never drops
 		// incoming txes. Raft mode doesn't use the fetcher or downloader, and so
@@ -945,33 +943,35 @@ func (pm *ProtocolManager) handleMsg(p *peer) error {
 		}
 		pm.txpool.AddRemotes(txs)
 
-	case msg.Code == GetStateDataMsg:
-		var request getStateData
-		if err := msg.Decode(&request); err != nil {
-			return errResp(ErrDecode, "%v: %v", msg, err)
-		}
-		refNum := request.RefNum
-		root := request.Root
-		count := request.Count
-		results := pm.blockchain.StateData(root, request.Keys)
-		log.Debug("Received request from", "pshard", p.Shard(), "num", refNum, "root", root)
+		/*
+			case msg.Code == GetStateDataMsg:
+				var request getStateData
+				if err := msg.Decode(&request); err != nil {
+					return errResp(ErrDecode, "%v: %v", msg, err)
+				}
+				refNum := request.RefNum
+				root := request.Root
+				count := request.Count
+				results := pm.blockchain.StateData(root, request.Keys)
+				log.Debug("Received request from", "pshard", p.Shard(), "num", refNum, "root", root)
 
-		err := p.SendDataResponse(refNum, count, root, results)
-		if err != nil {
-			log.Error("Error in send state data response!", "error", err)
-		}
+				err := p.SendDataResponse(refNum, count, root, results)
+				if err != nil {
+					log.Error("Error in send state data response!", "error", err)
+				}
 
-	case msg.Code == StateDataMsg:
-		var request stateData
-		if err := msg.Decode(&request); err != nil {
-			return errResp(ErrDecode, "%v: %v", msg, err)
-		}
-		refNum := request.RefNum
-		root := request.Root
-		vals := request.Vals
-		log.Debug("Received response from", "pshard", p.Shard(), "num", refNum, "root", root)
+			case msg.Code == StateDataMsg:
+				var request stateData
+				if err := msg.Decode(&request); err != nil {
+					return errResp(ErrDecode, "%v: %v", msg, err)
+				}
+				refNum := request.RefNum
+				root := request.Root
+				vals := request.Vals
+				log.Debug("Received response from", "pshard", p.Shard(), "num", refNum, "root", root)
 
-		go pm.AddFetchedData(refNum, p.Shard(), vals)
+				go pm.AddFetchedData(refNum, p.Shard(), vals)
+		*/
 
 	default:
 		return errResp(ErrInvalidMsgCode, "%v", msg.Code)
@@ -983,6 +983,7 @@ func (pm *ProtocolManager) Enqueue(id string, block *types.Block) {
 	pm.fetcher.Enqueue(id, block)
 }
 
+/*
 // AddFetchedData fills the data cache with data downloaded from peer
 func (pm *ProtocolManager) AddFetchedData(refNum, pshard uint64, vals []*types.KeyVal) {
 	pm.foreignDataMu.RLock()
@@ -1069,6 +1070,7 @@ func (pm *ProtocolManager) FetchDataShard(refNum, shard uint64, root common.Hash
 	}
 	return
 }
+*/
 
 // BroadcastBlock will either propagate a block to a subset of it's peers, or
 // will only announce it's availability (depending what's requested).
@@ -1113,7 +1115,7 @@ func (pm *ProtocolManager) BroadcastBlock(block *types.Block, propagate bool) {
 						peer.AsyncSendNewBlock(true, block, td)
 					}
 				}
-				log.Trace("Propagated block", "hash", hash, "recipients", len(transfer), "duration", common.PrettyDuration(time.Since(block.ReceivedAt)))
+				log.Debug("Propagated block1", "hash", hash, "recipients", len(transfer), "duration", common.PrettyDuration(time.Since(block.ReceivedAt)))
 			}
 			pm.cousinPeerLock.RUnlock()
 		} else {
@@ -1145,7 +1147,7 @@ func (pm *ProtocolManager) BroadcastBlock(block *types.Block, propagate bool) {
 							peer.AsyncSendNewBlock(true, block, td)
 						}
 					}
-					log.Trace("Propagated block", "hash", hash, "recipients", len(transfer), "duration", common.PrettyDuration(time.Since(block.ReceivedAt)))
+					log.Debug("Propagated block2", "hash", hash, "recipients", len(transfer), "duration", common.PrettyDuration(time.Since(block.ReceivedAt)))
 				}
 				pm.cousinPeerLock.RUnlock()
 			} else {
@@ -1177,46 +1179,7 @@ func (pm *ProtocolManager) BroadcastBlock(block *types.Block, propagate bool) {
 				for _, peer := range transfer {
 					peer.AsyncSendNewBlock(false, block, td)
 				}
-				log.Trace("Propagated block", "hash", hash, "recipients", len(transfer), "duration", common.PrettyDuration(time.Since(block.ReceivedAt)))
-
-				shardByte := make([]byte, 32)
-				blkNumByte := make([]byte, 32)
-				refBlkNumByte := make([]byte, 32)
-				binary.BigEndian.PutUint64(shardByte[24:], pm.myshard)
-				binary.BigEndian.PutUint64(blkNumByte[24:], block.NumberU64())
-				binary.BigEndian.PutUint64(refBlkNumByte[24:], block.RefNumberU64())
-
-				var start int
-				dataLen := 4*32 + 4
-				data := make([]byte, dataLen)
-				funcAddress, _ := hex.DecodeString("8a31297a")
-				start += copy(data[start:], funcAddress)
-				start += copy(data[start:], shardByte)
-				start += copy(data[start:], blkNumByte)
-				start += copy(data[start:], refBlkNumByte)
-				start += copy(data[start:], block.Root().Bytes())
-
-				// NewTransaction(txType, nonce, shard, to, amount, gasLimit, gasPrice, data)
-				stateTx := types.NewTransaction(types.StateCommit, block.NumberU64()-1, pm.myshard, pm.refAddress, big.NewInt(0), pm.stateGasLimit, pm.stateGasPrice, data)
-				var txs []*types.Transaction
-				txs = append(txs, stateTx)
-				pm.cousinPeerLock.RLock()
-				refPeers := pm.cousinPeers[uint64(0)].PeersWithoutTx(stateTx.Hash())
-				pm.cousinPeerLock.RUnlock()
-
-				// Send the block to a subset of our peers
-				rTransferLen := int(math.Sqrt(float64(len(refPeers))))
-				if rTransferLen < minBroadcastPeers {
-					rTransferLen = minBroadcastPeers
-				}
-				if rTransferLen > len(refPeers) {
-					rTransferLen = len(refPeers)
-				}
-				rTransfer := refPeers[:rTransferLen]
-				for _, peer := range rTransfer {
-					peer.AsyncSendTransactions(txs)
-				}
-				log.Debug("Propagated state committment", "number", block.Number(), "bh", block.Hash(), "th", stateTx.Hash(), "val", stateTx.Value().Uint64(), "data", hex.EncodeToString(data))
+				log.Debug("Propagated block3", "hash", hash, "recipients", len(transfer), "duration", common.PrettyDuration(time.Since(block.ReceivedAt)))
 			}
 		}
 		return
@@ -1237,7 +1200,7 @@ func (pm *ProtocolManager) BroadcastBlock(block *types.Block, propagate bool) {
 				peer.AsyncSendNewBlockHash(true, block)
 				receipients++
 			}
-			log.Trace("Propagated block", "hash", hash, "recipients", receipients, "duration", common.PrettyDuration(time.Since(block.ReceivedAt)))
+			log.Debug("Propagated block4", "hash", hash, "recipients", receipients, "duration", common.PrettyDuration(time.Since(block.ReceivedAt)))
 		}
 	} else {
 		if pm.blockchain.HasBlock(hash, block.NumberU64()) {
@@ -1262,7 +1225,7 @@ func (pm *ProtocolManager) BroadcastBlock(block *types.Block, propagate bool) {
 							peer.AsyncSendNewBlockHash(true, block)
 						}
 					}
-					log.Debug("Propagated block", "hash", hash, "recipients", len(transfer), "duration", common.PrettyDuration(time.Since(block.ReceivedAt)))
+					log.Debug("Propagated block5", "hash", hash, "recipients", len(transfer), "duration", common.PrettyDuration(time.Since(block.ReceivedAt)))
 				}
 				pm.cousinPeerLock.RUnlock()
 			} else {
@@ -1273,7 +1236,7 @@ func (pm *ProtocolManager) BroadcastBlock(block *types.Block, propagate bool) {
 					peer.AsyncSendNewBlockHash(false, block)
 					receipients++
 				}
-				log.Debug("Propagated block", "hash", hash, "recipients", receipients, "duration", common.PrettyDuration(time.Since(block.ReceivedAt)))
+				log.Debug("Propagated block6", "hash", hash, "recipients", receipients, "duration", common.PrettyDuration(time.Since(block.ReceivedAt)))
 			}
 		}
 	}
@@ -1320,6 +1283,7 @@ func (pm *ProtocolManager) minedBroadcastLoop() {
 	}
 }
 
+/*
 func (pm *ProtocolManager) fetchForeignDataLoop() {
 	for obj := range pm.refBlockSub.Chan() {
 		if ev, ok := obj.Data.(core.NewRefBlockEvent); ok {
@@ -1327,6 +1291,7 @@ func (pm *ProtocolManager) fetchForeignDataLoop() {
 		}
 	}
 }
+*/
 
 func (pm *ProtocolManager) txBroadcastLoop() {
 	for {

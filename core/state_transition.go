@@ -62,7 +62,7 @@ type StateTransition struct {
 	value      *big.Int
 	data       []byte
 	state      vm.StateDB
-	dc         *types.DataCache
+	tcb        *types.TxControl
 	bshard     uint64
 	evm        *vm.EVM
 }
@@ -133,7 +133,7 @@ func NewStateTransition(evm *vm.EVM, msg Message, gp *GasPool) *StateTransition 
 		gasPrice: msg.GasPrice(),
 		value:    msg.Value(),
 		data:     msg.Data(),
-		dc:       evm.DC(),
+		tcb:      evm.Tcb(),
 		bshard:   evm.Shard(),
 		state:    evm.PublicState(),
 	}
@@ -185,7 +185,8 @@ func (st *StateTransition) buyGas() error {
 
 func (st *StateTransition) preCheck() error {
 	// Make sure this transaction's nonce is correct.
-	if st.msg.TxType() == types.ContractInit || st.msg.TxType() == types.CrossShardLocal {
+	txType := st.msg.TxType()
+	if txType == types.ContractInit || txType == types.CrossShardLocal || txType == types.LocalDecision || txType == types.TxnStatus {
 		return st.buyGas()
 	}
 	if st.msg.CheckNonce() {
@@ -264,29 +265,29 @@ func (st *StateTransition) TransitionDb() (ret []byte, usedGas uint64, failed bo
 		// If the transaction is private it has already been incremented on
 		// the public state.
 		if !isPrivate {
-			if st.dc != nil && st.bshard > uint64(0) {
+			if st.tcb != nil && st.bshard > uint64(0) {
 				var (
 					shard uint64
 					ok    bool
 					addr  = sender.Address()
 				)
-				st.dc.DataCacheMu.RLock()
-				if shard, ok = st.dc.AddrToShard[addr]; ok {
-					st.dc.DataCacheMu.RUnlock()
+				st.tcb.TxControlMu.RLock()
+				if shard, ok = st.tcb.AddrToShard[addr]; ok {
+					st.tcb.TxControlMu.RUnlock()
 					if shard == st.bshard {
 						publicState.SetNonce(msg.From(), publicState.GetNonce(sender.Address())+1)
 					} else {
-						st.dc.DataCacheMu.Lock()
-						if st.dc.Values[addr] == nil {
+						st.tcb.TxControlMu.Lock()
+						if st.tcb.Values[addr] == nil {
 							log.Warn("Values in datache is nill for", "addr", addr)
 							return nil, 0, false, errNilValueFound
 						} else {
-							st.dc.Values[addr].Nonce = st.dc.Values[addr].Nonce + uint64(1)
-							st.dc.DataCacheMu.Unlock()
+							st.tcb.Values[addr].Nonce = st.tcb.Values[addr].Nonce + uint64(1)
+							st.tcb.TxControlMu.Unlock()
 						}
 					}
 				} else {
-					st.dc.DataCacheMu.RUnlock()
+					st.tcb.TxControlMu.RUnlock()
 					log.Error("Address not found in the mentioned list")
 					return nil, 0, false, errKeyNotFound
 				}

@@ -681,7 +681,7 @@ func (pool *TxPool) add(tx *types.Transaction, local bool) (bool, error) {
 	}
 
 	from, _ := types.Sender(pool.signer, tx)
-	if tx.TxType() != types.StateCommit {
+	if tx.TxType() != types.TxnStatus {
 		// If the transaction fails basic validation, discard it
 		if err := pool.validateTx(tx, local); err != nil {
 			if tx.TxType() != uint64(2) {

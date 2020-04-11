@@ -1522,11 +1522,12 @@ func MakeChain(ctx *cli.Context, stack *node.Node) (chain *core.BlockChain, chai
 	}
 	vmcfg := vm.Config{EnablePreimageRecording: ctx.GlobalBool(VMEnableDebugFlag.Name)}
 	var (
-		lock   sync.RWMutex
-		prlock sync.RWMutex
-		fdlock sync.RWMutex
+		clock    sync.RWMutex
+		promLock sync.RWMutex
+		refLock  sync.RWMutex
+		addrLock sync.RWMutex
 	)
-	chain, err = core.NewBlockChain(chainDb, cache, config, engine, vmcfg, nil, false, uint64(0), uint64(1), nil, nil, nil, nil, fdlock, nil, prlock, lock)
+	chain, err = core.NewBlockChain(chainDb, cache, config, engine, vmcfg, nil, false, uint64(0), uint64(1), nil, clock, nil, promLock, nil, refLock, nil, addrLock)
 	if err != nil {
 		Fatalf("Can't create BlockChain: %v", err)
 	}

@@ -54,7 +54,7 @@ func NewStateProcessor(config *params.ChainConfig, bc *BlockChain, engine consen
 // Process returns the receipts and logs accumulated during the process and
 // returns the amount of gas that was used in the process. If any of the
 // transactions failed to execute due to insufficient gas it will return an error.
-func (p *StateProcessor) Process(block *types.Block, start, end uint64, statedb, privateState *state.StateDB, cfg vm.Config) (types.Receipts, types.Receipts, []*types.Log, uint64, error) {
+func (p *StateProcessor) Process(block *types.Block, statedb, privateState *state.StateDB, cfg vm.Config) (types.Receipts, types.Receipts, []*types.Log, uint64, error) {
 
 	var (
 		receipts types.Receipts
@@ -62,8 +62,7 @@ func (p *StateProcessor) Process(block *types.Block, start, end uint64, statedb,
 		header   = block.Header()
 		allLogs  []*types.Log
 		gp       = new(GasPool).AddGas(block.GasLimit())
-		dc       *types.DataCache
-		curr     = start
+		tcb      *types.TxControl
 
 		privateReceipts types.Receipts
 	)
@@ -79,31 +78,33 @@ func (p *StateProcessor) Process(block *types.Block, start, end uint64, statedb,
 		snap := statedb.Snapshot()
 		psnap := privateState.Snapshot()
 
-		if tx.TxType() != types.CrossShardLocal {
-			dc = nil
-		} else {
-			for curr <= end {
-				found := false
-				// @sourav, todo: Add locks for pendingCrossTxs map
-				for _, ctx := range p.bc.pendingCrossTxs[curr].Txs {
-					if tx.Hash() == ctx.Tx.Hash() {
-						p.bc.foreignDataMu.RLock()
-						dc = p.bc.foreignData[curr]
-						p.bc.foreignDataMu.RUnlock()
-						found = true
-						log.Debug("Cross shard Transaction with", "hash", tx.Hash(), "refNum", curr)
+		/*
+			if tx.TxType() != types.CrossShardLocal {
+				tcb = nil
+			} else {
+				for curr <= end {
+					found := false
+					// @sourav, todo: Add locks for pendingCrossTxs map
+					for _, ctx := range p.bc.pendingCrossTxs[curr].Txs {
+						if tx.Hash() == ctx.Tx.Hash() {
+							p.bc.foreignDataMu.RLock()
+							tcb = p.bc.foreignData[curr]
+							p.bc.foreignDataMu.RUnlock()
+							found = true
+							log.Debug("Cross shard Transaction with", "hash", tx.Hash(), "refNum", curr)
+							break
+						}
+					}
+					if found {
 						break
 					}
+					curr++
 				}
-				if found {
-					break
-				}
-				curr++
 			}
-		}
+		*/
 
 		// s1 := statedb.Copy()
-		receipt, privateReceipt, _, err := ApplyTransaction(p.config, p.bc, nil, gp, dc, statedb, privateState, header, tx, usedGas, cfg)
+		receipt, privateReceipt, _, err := ApplyTransaction(p.config, p.bc, nil, gp, tcb, statedb, privateState, header, tx, usedGas, cfg)
 		// s2 := statedb.Copy()
 		if tx.TxType() == types.CrossShardLocal && err != nil {
 			statedb.RevertToSnapshot(snap)
@@ -143,7 +144,7 @@ func (p *StateProcessor) Process(block *types.Block, start, end uint64, statedb,
 // and uses the input parameters for its environment. It returns the receipt
 // for the transaction, gas used and an error if the transaction failed,
 // indicating the block was invalid.
-func ApplyTransaction(config *params.ChainConfig, bc *BlockChain, author *common.Address, gp *GasPool, dc *types.DataCache, statedb, privateState *state.StateDB, header *types.Header, tx *types.Transaction, usedGas *uint64, cfg vm.Config) (*types.Receipt, *types.Receipt, uint64, error) {
+func ApplyTransaction(config *params.ChainConfig, bc *BlockChain, author *common.Address, gp *GasPool, tcb *types.TxControl, statedb, privateState *state.StateDB, header *types.Header, tx *types.Transaction, usedGas *uint64, cfg vm.Config) (*types.Receipt, *types.Receipt, uint64, error) {
 	if !config.IsQuorum || !tx.IsPrivate() {
 		privateState = statedb
 	}
@@ -153,7 +154,7 @@ func ApplyTransaction(config *params.ChainConfig, bc *BlockChain, author *common
 	}
 
 	// Updating the address of the transaction
-	if tx.TxType() == types.StateCommit {
+	if tx.TxType() == types.TxnStatus {
 		commitAddress := bc.CommitAddress()
 		tx.SetRecipient(&commitAddress)
 	}
@@ -165,7 +166,7 @@ func ApplyTransaction(config *params.ChainConfig, bc *BlockChain, author *common
 	context := NewEVMContext(msg, header, bc, author)
 	// Create a new environment which holds all relevant information
 	// about the transaction and calling mechanisms.
-	vmenv := vm.NewEVM(context, dc, statedb, privateState, config, cfg)
+	vmenv := vm.NewEVM(context, tcb, statedb, privateState, config, cfg)
 
 	// Apply the transaction to the current state (included in the env)
 	_, gas, failed, err := ApplyMessage(vmenv, msg, gp)
