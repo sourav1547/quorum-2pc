@@ -1503,6 +1503,7 @@ func (bc *BlockChain) ParseBlock(block *types.Block, receipts types.Receipts) {
 		if rStatus && receipt.Logs != nil {
 			if tx.TxType() == types.CrossShard || tx.TxType() == types.TxnStatus {
 				eventOutput = binary.BigEndian.Uint64(receipt.Logs[0].Data[u64Offset:])
+				txStatus = true
 				txStatus = eventOutput == uint64(1)
 			} else {
 				log.Debug("rStatus passed", "txType", tx.TxType())
@@ -1521,7 +1522,8 @@ func (bc *BlockChain) ParseBlock(block *types.Block, receipts types.Receipts) {
 					startIndex := (2+1+numShards)*elemSize + elemSize // Last 32 bytes to avoid string length
 					crossTx := bc.ParseCrossTxData(uint16(numShards), data[2+startIndex:])
 					crossTx.BlockNum = block.Number()
-					ctxHash := tx.Hash()
+					// ctxHash := tx.Hash()
+					ctxHash := crossTx.Tx.Hash()
 
 					if _, ok := bc.pendingCrossTxs[ctxHash]; !ok {
 						bc.crossTxsMu.Lock()

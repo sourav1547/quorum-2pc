@@ -17,6 +17,8 @@
 package core
 
 import (
+	"encoding/binary"
+
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/consensus"
 	"github.com/ethereum/go-ethereum/consensus/misc"
@@ -65,6 +67,7 @@ func (p *StateProcessor) Process(block *types.Block, statedb, privateState *stat
 		tcb      *types.TxControl
 
 		privateReceipts types.Receipts
+		txType          uint64
 	)
 	// Mutate the block and state according to any hard-fork specs
 	if p.config.DAOForkSupport && p.config.DAOForkBlock != nil && p.config.DAOForkBlock.Cmp(block.Number()) == 0 {
@@ -106,6 +109,60 @@ func (p *StateProcessor) Process(block *types.Block, statedb, privateState *stat
 		// s1 := statedb.Copy()
 		receipt, privateReceipt, _, err := ApplyTransaction(p.config, p.bc, nil, gp, tcb, statedb, privateState, header, tx, usedGas, cfg)
 		// s2 := statedb.Copy()
+
+		txType = tx.TxType()
+
+		// Unlocking keys
+		if txType == types.CrossShardLocal {
+			tcb.TxControlMu.RLock()
+			keyval := tcb.Keyval
+			tcb.TxControlMu.RUnlock()
+
+			for addr, keys := range keyval {
+				p.bc.lockedAddrMu.RLock()
+				aclok := p.bc.lockedAddr[addr]
+				p.bc.lockedAddrMu.RUnlock()
+
+				aclok.ClockMu.Lock()
+				for _, key := range keys.Keys {
+					delete(aclok.Keys, key)
+				}
+				clockSize := len(aclok.Keys)
+				aclok.ClockMu.Unlock()
+				if clockSize == 0 {
+					p.bc.lockedAddrMu.Lock()
+					delete(p.bc.lockedAddr, addr)
+					p.bc.lockedAddrMu.Unlock()
+				}
+			}
+		} else if txType == types.LocalDecision {
+			index := 4
+			data := tx.Data()
+			tHash := common.BytesToHash(data[index : index+32])
+			status := binary.BigEndian.Uint64(data[index+24:])
+			// status: 1==commit, 0==abort
+			if status == uint64(1) {
+				p.bc.crossTxsMu.RLock()
+				keyVal := p.bc.pendingCrossTxs[tHash].Keyval
+				p.bc.crossTxsMu.RUnlock()
+
+				for addr, ckeys := range keyVal {
+					p.bc.lockedAddrMu.Lock()
+					if _, ok := p.bc.lockedAddr[addr]; !ok {
+						p.bc.lockedAddr[addr] = types.NewCLock(addr)
+					}
+					alock := p.bc.lockedAddr[addr]
+					p.bc.lockedAddrMu.Unlock()
+
+					alock.ClockMu.Lock()
+					for _, key := range ckeys.Keys {
+						alock.Keys[key] = false
+					}
+					alock.ClockMu.Unlock()
+				}
+			}
+		}
+
 		if tx.TxType() == types.CrossShardLocal && err != nil {
 			statedb.RevertToSnapshot(snap)
 			privateState.RevertToSnapshot(psnap)
