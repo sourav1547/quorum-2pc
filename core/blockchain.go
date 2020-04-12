@@ -120,6 +120,7 @@ type BlockChain struct {
 	chainConfig *params.ChainConfig // Chain & network configuration
 	cacheConfig *CacheConfig        // Cache configuration for pruning
 
+	crossCount      uint64
 	commitAddress   common.Address                   // Address of state commitment transaction
 	pendingCrossTxs map[common.Hash]*types.TxControl // Pending Cross shard transactions
 	crossTxsMu      sync.RWMutex
@@ -198,6 +199,7 @@ func NewBlockChain(db ethdb.Database, cacheConfig *CacheConfig, chainConfig *par
 	bc := &BlockChain{
 		myshard:           shard,
 		numShard:          numShard,
+		crossCount:        uint64(0),
 		ref:               ref,
 		chainConfig:       chainConfig,
 		cacheConfig:       cacheConfig,
@@ -276,6 +278,17 @@ func (bc *BlockChain) getProcInterrupt() bool {
 // CommitAddress Returns the address of the state commitment transaction
 func (bc *BlockChain) CommitAddress() common.Address {
 	return bc.commitAddress
+}
+
+// CrossCount counts the total number of cross-shard transaction the shard was
+// involved in
+func (bc *BlockChain) CrossCount() uint64 {
+	return bc.crossCount
+}
+
+// AddCount increment count
+func (bc *BlockChain) AddCount(count uint64) {
+	bc.crossCount = bc.crossCount + count
 }
 
 // SetCommitAddress Sets the commit address of the chain.

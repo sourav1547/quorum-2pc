@@ -68,6 +68,7 @@ func (p *StateProcessor) Process(block *types.Block, statedb, privateState *stat
 
 		privateReceipts types.Receipts
 		txType          uint64
+		ccount          = uint64(0)
 	)
 	// Mutate the block and state according to any hard-fork specs
 	if p.config.DAOForkSupport && p.config.DAOForkBlock != nil && p.config.DAOForkBlock.Cmp(block.Number()) == 0 {
@@ -161,6 +162,7 @@ func (p *StateProcessor) Process(block *types.Block, statedb, privateState *stat
 					alock.ClockMu.Unlock()
 				}
 			}
+			ccount++
 		}
 
 		if tx.TxType() == types.CrossShardLocal && err != nil {
@@ -194,6 +196,7 @@ func (p *StateProcessor) Process(block *types.Block, statedb, privateState *stat
 	// if header.Shard > uint64(0) {
 	// 	log.Info("@ds Process before finalize", "s3", s3.IntermediateRoot(false), "s4", s4.IntermediateRoot(false))
 	// }
+	p.bc.AddCount(ccount)
 	return receipts, privateReceipts, allLogs, *usedGas, nil
 }
 

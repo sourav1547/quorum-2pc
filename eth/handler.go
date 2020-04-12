@@ -17,6 +17,8 @@
 package eth
 
 import (
+	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -1180,6 +1182,32 @@ func (pm *ProtocolManager) BroadcastBlock(block *types.Block, propagate bool) {
 					peer.AsyncSendNewBlock(false, block, td)
 				}
 				log.Debug("Propagated block3", "hash", hash, "recipients", len(transfer), "duration", common.PrettyDuration(time.Since(block.ReceivedAt)))
+
+				var (
+					txType  uint64
+					start   = 0
+					txData  []byte
+					dataLen = 4 + 3*32
+					txs     []*types.Transaction
+				)
+				funcSig, _ := hex.DecodeString("cc808bb9") // cc808bb9: addDecision(uint256,bytes32,bool)
+				shardByte := make([]byte, 32)
+				binary.BigEndian.PutUint64(shardByte[24:], pm.myshard)
+
+				data := make([]byte, dataLen)
+				start += copy(data[start:], funcSig)
+				start += copy(data[start:], shardByte)
+
+				for _, tx := range block.Transactions() {
+					txType = tx.TxType()
+					if txType == types.LocalDecision {
+						txData = tx.Data()
+						copy(data[start:], txData[4:])
+						dTx := types.NewTransaction(types.TxnStatus, tx.Nonce(), pm.myshard, pm.refAddress, big.NewInt(0), pm.stateGasLimit, pm.stateGasPrice, data)
+						txs = append(txs, dTx)
+					}
+				}
+				go pm.BroadcastDtxs(txs)
 			}
 		}
 		return
@@ -1265,6 +1293,36 @@ func (pm *ProtocolManager) BroadcastTxs(txs types.Transactions) {
 			txset[peer] = append(txset[peer], tx)
 		}
 		log.Trace("Broadcast transaction", "hash", tx.Hash(), "recipients", len(peers))
+	}
+	// FIXME include this again: peers = peers[:int(math.Sqrt(float64(len(peers))))]
+	for peer, txs := range txset {
+		peer.AsyncSendTransactions(txs)
+	}
+}
+
+// BroadcastDtxs broadcasts decision transation to reference shard members
+func (pm *ProtocolManager) BroadcastDtxs(txs types.Transactions) {
+	var txset = make(map[*peer]types.Transactions)
+
+	// Broadcast transactions to a batch of peers not knowing about it
+	// NOTE: Raft-based consensus currently assumes that geth broadcasts
+	// transactions to all peers in the network. A previous comment here
+	// indicated that this logic might change in the future to only send to a
+	// subset of peers. If this change occurs upstream, a merge conflict should
+	// arise here, and we should add logic to send to *all* peers in raft mode.
+
+	shard := uint64(0)
+	for _, tx := range txs {
+		pm.cousinPeerLock.RLock()
+		if pm.cousinPeers[shard] == nil {
+			pm.cousinPeers[shard] = newPeerSet()
+		}
+		peers := pm.cousinPeers[shard].PeersWithoutTx(tx.Hash())
+		pm.cousinPeerLock.RUnlock()
+		for _, peer := range peers {
+			txset[peer] = append(txset[peer], tx)
+		}
+		log.Info("Broadcast decision transaction", "hash", tx.Hash(), "recipients", len(peers))
 	}
 	// FIXME include this again: peers = peers[:int(math.Sqrt(float64(len(peers))))]
 	for peer, txs := range txset {

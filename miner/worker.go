@@ -728,6 +728,7 @@ func (w *worker) resultLoop() {
 				txType uint64
 				tHash  common.Hash
 				tcb    *types.TxControl
+				ccount = uint64(0)
 			)
 			for _, tx := range block.Transactions() {
 				txType = tx.TxType()
@@ -784,8 +785,10 @@ func (w *worker) resultLoop() {
 							alock.ClockMu.Unlock()
 						}
 					}
+					ccount++
 				}
 			}
+			w.chain.AddCount(ccount)
 
 			log.Info("Successfully sealed new block", "number", block.Number(), "sealhash", sealhash, "hash", hash, "root", block.Root(),
 				"elapsed", common.PrettyDuration(time.Since(task.createdAt)))
@@ -1266,7 +1269,7 @@ func (w *worker) commitNewTransactions(commit bool, tHashes []common.Hash, coinb
 	if w.current.gasPool == nil {
 		w.current.gasPool = new(core.GasPool).AddGas(w.gasLimit)
 	}
-
+	ccount := w.chain.CrossCount()
 	for _, tHash := range tHashes {
 		if interrupt != nil && atomic.LoadInt32(interrupt) != commitInterruptNone {
 			// Notify resubmit loop to increase resubmitting interval due to too frequent commits.
@@ -1299,7 +1302,7 @@ func (w *worker) commitNewTransactions(commit bool, tHashes []common.Hash, coinb
 		start += copy(data[start:], tHash.Bytes())
 		start += copy(data[start:], statusByte)
 
-		statusTx := types.NewTransaction(types.LocalDecision, w.nonce, w.eth.MyShard(), w.chain.CommitAddress(), big.NewInt(0), w.txGasLimit, big.NewInt(0), data)
+		statusTx := types.NewTransaction(types.LocalDecision, ccount, w.eth.MyShard(), w.chain.CommitAddress(), big.NewInt(0), w.txGasLimit, big.NewInt(0), data)
 
 		if w.current.gasPool.Gas() < params.TxGas {
 			log.Warn("Not enough gas for further cross-shard transactions", "have", w.current.gasPool, "want", params.TxGas)
@@ -1325,23 +1328,7 @@ func (w *worker) commitNewTransactions(commit bool, tHashes []common.Hash, coinb
 		w.current.txs = append(w.current.txs, statusTx)
 		w.current.receipts = append(w.current.receipts, receipt)
 		w.current.tcount++
-
-		if commit {
-			w.crossTxsMu.RLock()
-			tcb := w.pendingCrossTxs[tHash]
-			w.crossTxsMu.RUnlock()
-
-			for addr, ckeys := range tcb.Keyval {
-				w.lockedAddrMu.Lock()
-				if _, ok := w.lockedAddr[addr]; !ok {
-					w.lockedAddr[addr] = types.NewCLock(addr)
-				}
-				for _, key := range ckeys.Keys {
-					w.lockedAddr[addr].Keys[key] = false // false is the default setup
-				}
-				w.lockedAddrMu.Unlock()
-			}
-		}
+		ccount++
 	}
 	return false
 }
