@@ -288,7 +288,7 @@ func (st *StateTransition) TransitionDb() (ret []byte, usedGas uint64, failed bo
 					}
 				} else {
 					st.tcb.TxControlMu.RUnlock()
-					log.Error("Address not found in the mentioned list")
+					log.Error("Address not found in the mentioned list", "addr", addr)
 					return nil, 0, false, errKeyNotFound
 				}
 			} else {
