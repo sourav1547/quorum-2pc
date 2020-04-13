@@ -126,16 +126,16 @@ type statusData struct {
 
 // getStateData to request data
 type getStateData struct {
-	Root   common.Hash    // Block Has
-	RefNum uint64         // Block number
+	Root   common.Hash    // Block Hash
+	TxHash common.Hash    // Transaction Hash
 	Count  uint64         // Number of contracts
 	Keys   []*types.CKeys // Contract address and data address
 }
 
 // stateData data response
 type stateData struct {
-	Root   common.Hash     // Block Has
-	RefNum uint64          // Block number
+	Root   common.Hash     // Block Hash
+	TxHash common.Hash     // Transaction Hash
 	Count  uint64          // Number of contracts
 	Vals   []*types.KeyVal // Contract address and data address
 }

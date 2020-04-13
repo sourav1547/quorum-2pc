@@ -71,7 +71,7 @@ type Transaction struct {
 }
 
 type txdata struct {
-	TxType       uint64          `json:"txType"    gencodec:"required"`
+	TxType       uint64          `json:"txType"   gencodec:"required"`
 	AccountNonce uint64          `json:"nonce"    gencodec:"required"`
 	Shard        uint64          `json:"shard"	  gencoded:"required"`
 	Price        *big.Int        `json:"gasPrice" gencodec:"required"`
@@ -564,12 +564,13 @@ func NewTCommits() *TCommits {
 }
 
 // AddCommit adds a commit for some particular shard
-func (tcs *TCommits) AddCommit(shard uint64, commit *TCommit) {
+func (tcs *TCommits) AddCommit(shard uint64, commit *TCommit) int {
 	tcs.Lock.Lock()
 	defer tcs.Lock.Unlock()
 	if _, ok := tcs.Commits[shard]; !ok {
 		tcs.Commits[shard] = commit
 	}
+	return len(tcs.Commits)
 }
 
 // GetCommit returns commitment of a shard
@@ -608,17 +609,19 @@ func NewCLock(addr common.Address) *CLock {
 
 // TxControl stores foreign data for one block
 type TxControl struct {
-	TxControlMu sync.RWMutex
-	Tx          *Transaction
-	RefNum      uint64
-	Status      bool
-	Required    int
-	Received    int                       // overall data avaiability status
-	Keyval      map[common.Address]*CKeys // list of (k,v) pairs for each contract
-	AddrToShard map[common.Address]uint64 // addr to shard mapping
-	ShardStatus map[uint64]bool           // shard to its status mapping
-	Commits     *TCommits                 // Corresponding commit
-	Values      map[common.Address]*CData // key-value pair per contract
+	TxControlMu  sync.RWMutex
+	Tx           *Transaction
+	TxID         uint64
+	RefNum       uint64
+	Status       bool
+	Required     int
+	Received     int                       // overall data avaiability status
+	Keyval       map[common.Address]*CKeys // list of (k,v) pairs for each contract
+	AddrToShard  map[common.Address]uint64 // addr to shard mapping
+	ShardStatus  map[uint64]bool           // shard to its status mapping
+	CommitStatus map[uint64]bool           // shard to its commit status mapping
+	Commits      *TCommits                 // Corresponding commit
+	Values       map[common.Address]*CData // key-value pair per contract
 }
 
 // NewTxControl creates a new datacache
@@ -626,6 +629,7 @@ func NewTxControl(rNum uint64, status bool) *TxControl {
 	return &TxControl{
 		RefNum:      rNum,
 		Status:      status,
+		TxID:        0,
 		Required:    0,
 		Received:    0,
 		Keyval:      make(map[common.Address]*CKeys),
@@ -659,7 +663,7 @@ func (tcb *TxControl) AddData(shard uint64, vals []*KeyVal) {
 				cdata.Data[key] = val
 			}
 			tcb.Values[caddr] = cdata
-			log.Info("@ds adding data for", "addr", tcb.Values[caddr].Addr, "bal", tcb.Values[caddr].Nonce)
+			log.Debug("@ds adding data for", "addr", tcb.Values[caddr].Addr, "bal", tcb.Values[caddr].Nonce)
 		}
 		tcb.ShardStatus[shard] = true
 		tcb.Received++
@@ -670,12 +674,13 @@ func (tcb *TxControl) AddData(shard uint64, vals []*KeyVal) {
 }
 
 // InitTxControl adds transaction detail
-func (tcb *TxControl) InitTxControl(myshard uint64, ctx *CrossTx) {
+func (tcb *TxControl) InitTxControl(myshard, txID uint64, ctx *CrossTx) {
 	tcb.TxControlMu.Lock()
 	defer tcb.TxControlMu.Unlock()
 	tcb.Received = 0
 	tcb.Required = 0
 	tcb.Tx = ctx.Tx
+	tcb.TxID = txID
 
 	for shard, allKeys := range ctx.AllContracts {
 		if _, ok := tcb.ShardStatus[shard]; !ok {
@@ -687,7 +692,7 @@ func (tcb *TxControl) InitTxControl(myshard uint64, ctx *CrossTx) {
 			if _, cok := tcb.AddrToShard[caddr]; !cok {
 				tcb.AddrToShard[caddr] = shard
 				tcb.Keyval[caddr] = &CKeys{Addr: caddr}
-				log.Info("@ds adding keys to KeyVal", "addr", caddr, "shard", shard)
+				log.Debug("@ds adding keys to KeyVal", "addr", caddr, "shard", shard)
 			}
 			for _, key := range contract.Keys {
 				tcb.Keyval[caddr].AddKey(key)
@@ -697,9 +702,28 @@ func (tcb *TxControl) InitTxControl(myshard uint64, ctx *CrossTx) {
 }
 
 // AddTCommit adds commitment for a transaction
-func (tcb *TxControl) AddTCommit(commit *TCommit) {
+func (tcb *TxControl) AddTCommit(commit *TCommit) bool {
+	tcb.TxControlMu.Lock()
+	defer tcb.TxControlMu.Unlock()
+
 	shard := commit.Shard
-	tcb.Commits.AddCommit(shard, commit)
+	if _, sok := tcb.CommitStatus[shard]; !sok {
+		count := tcb.Commits.AddCommit(shard, commit)
+		if count == tcb.Required {
+			return true
+		}
+	}
+	return false
+}
+
+// UpdateLocalStatus Update data status for local shard
+func (tcb *TxControl) UpdateLocalStatus(myshard uint64) {
+	tcb.TxControlMu.Lock()
+	defer tcb.TxControlMu.Unlock()
+	if !tcb.ShardStatus[myshard] {
+		tcb.ShardStatus[myshard] = true
+		tcb.Received++
+	}
 }
 
 // Message is a fully derived transaction and implements core.Message

@@ -1255,6 +1255,7 @@ func (bc *BlockChain) insertChain(chain types.Blocks) (int, []interface{}, []*ty
 		events        = make([]interface{}, 0, len(chain))
 		lastCanon     *types.Block
 		coalescedLogs []*types.Log
+		promHashes    []common.Hash
 	)
 	// Start the parallel header verifier
 	headers := make([]*types.Header, len(chain))
@@ -1466,7 +1467,8 @@ func (bc *BlockChain) insertChain(chain types.Blocks) (int, []interface{}, []*ty
 
 			// Parse transactions in reference chain to check for new state commitments
 			if bc.ref {
-				bc.ParseBlock(block, receipts)
+				hashes := bc.ParseBlock(block, receipts)
+				promHashes = append(promHashes, hashes...)
 			}
 
 		case SideStatTy:
@@ -1486,14 +1488,14 @@ func (bc *BlockChain) insertChain(chain types.Blocks) (int, []interface{}, []*ty
 	}
 	// Append a single chain head event if we've progressed the chain
 	if lastCanon != nil && bc.CurrentBlock().Hash() == lastCanon.Hash() {
-		events = append(events, ChainHeadEvent{lastCanon})
+		events = append(events, ChainHeadEvent{Block: lastCanon, PromHashes: promHashes})
 	}
 
 	return 0, events, coalescedLogs, nil
 }
 
 // ParseBlock function extracts necessary information from a reference block
-func (bc *BlockChain) ParseBlock(block *types.Block, receipts types.Receipts) {
+func (bc *BlockChain) ParseBlock(block *types.Block, receipts types.Receipts) []common.Hash {
 	var (
 		elemSize    = 32
 		u64Offset   = 24
@@ -1502,6 +1504,9 @@ func (bc *BlockChain) ParseBlock(block *types.Block, receipts types.Receipts) {
 		eventOutput uint64
 		rStatus     bool
 		txStatus    bool
+		txID        uint64
+		txType      uint64
+		promHashes  []common.Hash
 	)
 
 	if _, ok := bc.refCrossTxs[refNum]; !ok && refNum > uint64(0) {
@@ -1510,14 +1515,19 @@ func (bc *BlockChain) ParseBlock(block *types.Block, receipts types.Receipts) {
 
 	for i, tx := range block.Transactions() {
 		// Checking execution status of the transaction
+		txType = tx.TxType()
 		receipt := receipts[i]
 		rStatus = receipt.Status == uint64(1)
 		txStatus = false
 		if rStatus && receipt.Logs != nil {
-			if tx.TxType() == types.CrossShard || tx.TxType() == types.TxnStatus {
-				eventOutput = binary.BigEndian.Uint64(receipt.Logs[0].Data[u64Offset:])
-				txStatus = true
+			if txType == types.CrossShard || txType == types.TxnStatus {
+				index := 0
+				eventOutput = binary.BigEndian.Uint64(receipt.Logs[0].Data[index+u64Offset : index+elemSize])
 				txStatus = eventOutput == uint64(1)
+				if txType == types.CrossShard {
+					index += elemSize
+					txID = binary.BigEndian.Uint64(receipt.Logs[0].Data[index+u64Offset : index+elemSize])
+				}
 			} else {
 				log.Debug("rStatus passed", "txType", tx.TxType())
 				continue
@@ -1527,7 +1537,7 @@ func (bc *BlockChain) ParseBlock(block *types.Block, receipts types.Receipts) {
 		}
 
 		if txStatus {
-			if tx.TxType() == types.CrossShard {
+			if txType == types.CrossShard {
 				data := tx.Data()[4:]
 				shardsInvolved, involved := bc.DecodeCrossTx(myshard, data)
 				if involved {
@@ -1541,7 +1551,7 @@ func (bc *BlockChain) ParseBlock(block *types.Block, receipts types.Receipts) {
 					if _, ok := bc.pendingCrossTxs[ctxHash]; !ok {
 						bc.crossTxsMu.Lock()
 						bc.pendingCrossTxs[ctxHash] = types.NewTxControl(refNum, false)
-						bc.pendingCrossTxs[ctxHash].InitTxControl(bc.myshard, crossTx)
+						bc.pendingCrossTxs[ctxHash].InitTxControl(bc.myshard, txID, crossTx)
 						bc.crossTxsMu.Unlock()
 
 						bc.refCrossMu.Lock()
@@ -1550,52 +1560,55 @@ func (bc *BlockChain) ParseBlock(block *types.Block, receipts types.Receipts) {
 						log.Info("New cross shard transaction added!", "bn", refNum, "shards", shardsInvolved, "th", ctxHash)
 					}
 				}
+			} else if txType == types.TxnStatus {
+				data := tx.Data()[4:]
+				var (
+					index    = 0
+					shard    uint64
+					tHash    common.Hash
+					root     common.Hash
+					status   uint64
+					decision bool
+					tcb      *types.TxControl
+				)
+				shard = binary.BigEndian.Uint64(data[index+u64Offset : index+elemSize])
+				index += elemSize
+				txID = binary.BigEndian.Uint64(data[index+u64Offset : index+elemSize])
+				index += elemSize
+				tHash = common.BytesToHash(data[index : index+elemSize])
+				index += elemSize
+				status = binary.BigEndian.Uint64(data[index+u64Offset : index+elemSize])
+				index += elemSize
+				root = common.BytesToHash(data[index : index+elemSize])
+				decision = status == uint64(1)
+
+				bc.crossTxsMu.RLock()
+				tcb, tok := bc.pendingCrossTxs[tHash]
+				bc.crossTxsMu.RUnlock()
+
+				log.Info("@pc TxnStatus received for", "thash", tHash, "shard", shard, "root", root, "decision", decision, "tok", tok)
+
+				if !decision {
+					bc.crossTxsMu.Lock()
+					if tok {
+						log.Info("@pc, Deleting cross-tx data", "thash", tHash, "shard", shard, "decision", decision)
+						delete(bc.pendingCrossTxs, tHash)
+					}
+					bc.crossTxsMu.Unlock()
+				} else {
+					if tok {
+						commit := &types.TCommit{TxHash: tHash, Shard: shard, Status: decision, StateRoot: root}
+						log.Info("@pc Added commit for", "shard", shard, "th", tHash, "status", status, "root", root)
+						if tcb.AddTCommit(commit) {
+							promHashes = append(promHashes, tHash)
+							log.Info("@pc Ready for data Download!", "thash", tHash)
+						}
+					}
+				}
 			}
 		}
 	}
-	// else if tx.TxType() == types.TxnStatus {
-	// data := tx.Data()[4:]
-	// var (
-	// 	index     = 0
-	// 	shard     uint64
-	// 	committed uint64
-	// 	refReport uint64
-	// )
-	// shard = binary.BigEndian.Uint64(data[index+u64Offset : index+elemSize])
-	// index += elemSize
-	// committed = binary.BigEndian.Uint64(data[index+u64Offset : index+elemSize])
-	// index += elemSize
-	// refReport = binary.BigEndian.Uint64(data[index+u64Offset : index+elemSize])
-	// index += elemSize
-	// stateRoot := common.BytesToHash(data[index:])
-	// if shard == bc.myshard {
-	// bc.commitLock.Lock()
-	// bc.myLatestCommit.Update(committed, refReport, stateRoot)
-	// bc.commitLock.Unlock()
-	// report = int(refReport)
-	// log.Info("Updated Latest commit", "commited", committed, "reported", refReport, "reporting", refNum, "root", stateRoot)
-	// bc.CleanPendingTx(refReport)
-	// } else {
-	// commit := &types.Commitment{Shard: shard, BlockNum: committed, RefNum: refReport, StateRoot: stateRoot}
-	// bc.commitments[refNum].AddCommit(shard, commit)
-	// log.Debug("New commit added for ", "shard", shard, "committed", committed, "reporting", refNum, "root", stateRoot)
-	// }
-	// }
-	// } else {
-	// 	log.Debug("Unsuccesful transaction execution!", "status", receipt.Status, "event", eventOutput, "txType", tx.TxType(), "hash", tx.Hash())
-	// }
-	// }
-
-	/**
-	bc.foreignDataMu.Lock()
-	if _, ok := bc.foreignData[refNum]; !ok {
-		bc.foreignData[refNum] = types.NewDataCache(refNum, status)
-	}
-	bc.foreignDataMu.Unlock()
-	if _, ok := bc.pendingCrossTxs[refNum]; ok {
-		bc.foreignData[refNum].InitKeys(bc.myshard, bc.pendingCrossTxs[refNum], bc.commitments[refNum])
-	}
-	*/
+	return promHashes
 }
 
 // CleanPendingTx removes commited cross-shard transactions
@@ -1673,7 +1686,7 @@ func (bc *BlockChain) ParseCrossTxData(numShard uint16, data []byte) *types.Cros
 	crossTx.SetTransaction(tx)
 	crossTx.Tx.SetFrom(types.HomesteadSigner{}, sender)
 
-	log.Info("New Cross shard Transaction", "hash", crossTx.Tx.Hash(), "from", crossTx.Tx.From(), "to", crossTx.Tx.To(), "nonce", crossTx.Tx.Nonce(), "value", crossTx.Tx.Value(), "function", funcSig, "params", hex.EncodeToString(data[startIndex:]))
+	log.Debug("New Cross shard Transaction", "hash", crossTx.Tx.Hash(), "from", crossTx.Tx.From(), "to", crossTx.Tx.To(), "nonce", crossTx.Tx.Nonce(), "value", crossTx.Tx.Value(), "function", funcSig, "params", hex.EncodeToString(data[startIndex:]))
 	return crossTx
 }
 
@@ -1874,12 +1887,13 @@ func (bc *BlockChain) Ref() bool {
 }
 
 // PostForeignDataEvent posts after downloading foreign data
-func (bc *BlockChain) PostForeignDataEvent(refNum uint64) {
-	bc.foreignDataFeed.Send(ForeignDataEvent{})
-	select {
-	case bc.foreignDataCh <- struct{}{}:
-	default:
-	}
+func (bc *BlockChain) PostForeignDataEvent(tHash common.Hash) {
+	log.Info("Foreign Data posted for ", "tHash", tHash)
+	// bc.foreignDataFeed.Send(ForeignDataEvent{})
+	// select {
+	// case bc.foreignDataCh <- struct{}{}:
+	// default:
+	// }
 }
 
 // PostChainEvents iterates over the events generated by a chain insertion and

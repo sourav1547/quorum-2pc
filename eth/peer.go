@@ -323,13 +323,13 @@ func (p *peer) AsyncSendNewBlock(ref bool, block *types.Block, td *big.Int) {
 }
 
 // SendDataRequest sends a data request to remote peer
-func (p *peer) SendDataRequest(refNum, count uint64, root common.Hash, keys []*types.CKeys) error {
-	return p2p.Send(p.rw, GetStateDataMsg, &getStateData{Root: root, RefNum: refNum, Count: count, Keys: keys})
+func (p *peer) SendDataRequest(tHash common.Hash, count uint64, root common.Hash, keys []*types.CKeys) error {
+	return p2p.Send(p.rw, GetStateDataMsg, &getStateData{Root: root, TxHash: tHash, Count: count, Keys: keys})
 }
 
 // SendDataResponse sends data
-func (p *peer) SendDataResponse(refNum, count uint64, root common.Hash, vals []*types.KeyVal) error {
-	return p2p.Send(p.rw, StateDataMsg, &stateData{Root: root, RefNum: refNum, Count: count, Vals: vals})
+func (p *peer) SendDataResponse(tHash common.Hash, count uint64, root common.Hash, vals []*types.KeyVal) error {
+	return p2p.Send(p.rw, StateDataMsg, &stateData{Root: root, TxHash: tHash, Count: count, Vals: vals})
 }
 
 // SendBlockHeaders sends a batch of block headers to the remote peer.
@@ -626,7 +626,8 @@ func (ps *peerSet) PeersWithoutBlock(hash common.Hash) []*peer {
 // the data request are not sent yet
 // @sourav, todo: as of now we are returning the entire
 // list of peers, we have to fix this later!
-func (ps *peerSet) PeersWithoutRequest(number uint64) []*peer {
+// Its implementation will be similar to PeersWithoutTx
+func (ps *peerSet) PeersWithoutRequest(tHash common.Hash) []*peer {
 	ps.lock.RLock()
 	defer ps.lock.RUnlock()
 

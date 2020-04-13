@@ -294,10 +294,6 @@ func newWorker(config *params.ChainConfig, engine consensus.Engine, eth Backend,
 		go worker.resultLoop()
 		go worker.taskLoop()
 
-		// if worker.eth.MyShard() > uint64(0) {
-		// 	go worker.crossTaskLoop()
-		// }
-
 		// Submit first work to initialize pending state.
 		worker.startCh <- struct{}{}
 	}
@@ -471,7 +467,10 @@ func (w *worker) newWorkLoop(recommit time.Duration) {
 
 		case head := <-w.rChainHeadCh:
 			block := head.Block
-			// w.mux.Post(core.NewRefBlockEvent{Start: w.getRefNumberU64(), End: block.NumberU64()})
+			promHashes := head.PromHashes
+			if len(promHashes) > 0 {
+				w.mux.Post(core.TxPromotedEvent{PromHashes: promHashes})
+			}
 			w.setRefNumber(block.Number())
 			w.setRefHash(block.Hash())
 			commit(false, commitInterruptNewHead)
@@ -725,10 +724,22 @@ func (w *worker) resultLoop() {
 			}
 
 			var (
-				txType uint64
+				// Fixed for every transaction
+				elemSize  = 32
+				u64Offset = 24
+				index     = 4
+				txType    uint64
+
+				// Local decision transaction
+				data []byte
+				// txID   uint64
 				tHash  common.Hash
-				tcb    *types.TxControl
-				ccount = uint64(0)
+				status uint64
+				croot  = block.Root()
+
+				tcb     *types.TxControl
+				ccount  = uint64(0)
+				myshard = w.eth.MyShard()
 			)
 			for _, tx := range block.Transactions() {
 				txType = tx.TxType()
@@ -760,15 +771,28 @@ func (w *worker) resultLoop() {
 						}
 					}
 				} else if txType == types.LocalDecision {
-					index := 4
-					data := tx.Data()
-					tHash := common.BytesToHash(data[index : index+32])
-					status := binary.BigEndian.Uint64(data[index+24:])
+					index = 4
+					data = tx.Data()
+					// txID = binary.BigEndian.Uint64(data[index+u64Offset : index+elemSize])
+					index += elemSize
+					tHash = common.BytesToHash(data[index : index+elemSize])
+					index += elemSize
+					status = binary.BigEndian.Uint64(data[index+u64Offset : index+elemSize])
+					decision := status == uint64(1)
+
 					// status: 1==commit, 0==abort
-					if status == uint64(1) {
+					if decision {
 						w.crossTxsMu.RLock()
-						keyVal := w.pendingCrossTxs[tHash].Keyval
+						tcb, tok := w.pendingCrossTxs[tHash]
+						if !tok {
+							w.crossTxsMu.RUnlock()
+							continue
+						}
 						w.crossTxsMu.RUnlock()
+
+						tcb.TxControlMu.RLock()
+						keyVal := w.pendingCrossTxs[tHash].Keyval
+						tcb.TxControlMu.RUnlock()
 
 						for addr, ckeys := range keyVal {
 							w.lockedAddrMu.Lock()
@@ -784,6 +808,18 @@ func (w *worker) resultLoop() {
 							}
 							alock.ClockMu.Unlock()
 						}
+
+						commit := &types.TCommit{TxHash: tHash, Shard: myshard, Status: decision, StateRoot: croot}
+						tcb.AddTCommit(commit)
+						tcb.UpdateLocalStatus(myshard)
+
+					} else {
+						w.crossTxsMu.Lock()
+						if _, tok := w.pendingCrossTxs[tHash]; tok {
+							log.Info("@pc, Deleting cross-tx data", "thash", tHash, "shard", w.eth.MyShard(), "decision", decision)
+							delete(w.pendingCrossTxs, tHash)
+						}
+						w.crossTxsMu.Unlock()
 					}
 					ccount++
 				}
@@ -880,7 +916,7 @@ func (w *worker) getNewTransactions(start, end uint64) ([]common.Hash, []common.
 		w.refCrossMu.RUnlock()
 		for _, th := range cTxs {
 			commit = w.checkCommitStatus(th)
-			log.Info("@pc, commit status from", "th", th, "commit", commit)
+			log.Debug("@pc, commit status from", "th", th, "commit", commit)
 			if commit {
 				commitTxs = append(commitTxs, th)
 			} else {
@@ -888,7 +924,7 @@ func (w *worker) getNewTransactions(start, end uint64) ([]common.Hash, []common.
 			}
 		}
 	}
-	log.Info("@pc, returing new transaction hashes", "cLen", len(commitTxs), "aLen", len(abortTxs))
+	log.Debug("@pc, returing new transaction hashes", "cLen", len(commitTxs), "aLen", len(abortTxs))
 	return commitTxs, abortTxs
 }
 
@@ -1001,7 +1037,7 @@ func (w *worker) getPromotedTransactions() []common.Hash {
 			}
 		}
 	}
-	log.Info("@pc, returning promoted transactions", "len", len(pTxs))
+	log.Debug("@pc, returning promoted transactions", "len", len(pTxs))
 	return pTxs
 }
 
@@ -1157,7 +1193,8 @@ func (w *worker) commitInitialContract(coinbase common.Address, interrupt *int32
 		w.current.tcount++
 	}
 
-	if w.eth.MyShard() == uint64(0) && w.current.tcount > 0 {
+	// The creator of the first block sets the commitAddress locally.
+	if w.current.tcount > 0 {
 		w.chain.SetCommitAddress(w.current.receipts[0].ContractAddress)
 	}
 	if !w.isRunning() && len(coalescedLogs) > 0 {
@@ -1288,19 +1325,31 @@ func (w *worker) commitNewTransactions(commit bool, tHashes []common.Hash, coinb
 
 		// commit == true, abort == false
 		var (
-			dataLen = 2*32 + 4
+			dataLen = 3*32 + 4
 			start   = 0
 		)
-		data := make([]byte, dataLen)
-		funcAddress, _ := hex.DecodeString("21a37d8a") // 21a37d8a: addDecision(bytes32,bool)
+
+		funcAddress, _ := hex.DecodeString("0f3484f7") // addDecision(uint256,bytes32,bool,bytes32)
+
+		// Decision of the shard
 		statusByte := make([]byte, 32)
 		statusByte[31] = 0
 		if commit {
 			statusByte[31] = 1
 		}
+
+		// TxID
+		w.crossTxsMu.RLock()
+		txID := w.pendingCrossTxs[tHash].TxID
+		w.crossTxsMu.RUnlock()
+		txidByte := make([]byte, 32)
+		binary.BigEndian.PutUint64(txidByte[24:], txID)
+
+		data := make([]byte, dataLen)
 		start += copy(data[start:], funcAddress)
-		start += copy(data[start:], tHash.Bytes())
-		start += copy(data[start:], statusByte)
+		start += copy(data[start:], txidByte)      // tx id
+		start += copy(data[start:], tHash.Bytes()) // transaction hash
+		start += copy(data[start:], statusByte)    // status
 
 		statusTx := types.NewTransaction(types.LocalDecision, ccount, w.eth.MyShard(), w.chain.CommitAddress(), big.NewInt(0), w.txGasLimit, big.NewInt(0), data)
 
@@ -1308,7 +1357,7 @@ func (w *worker) commitNewTransactions(commit bool, tHashes []common.Hash, coinb
 			log.Warn("Not enough gas for further cross-shard transactions", "have", w.current.gasPool, "want", params.TxGas)
 			break
 		}
-		log.Info("Posting local decision", "th", tHash, "sth", statusTx.Hash(), "val", statusTx.Value().Uint64(), "to", w.chain.CommitAddress(), "data", hex.EncodeToString(data))
+		log.Debug("Posting local decision", "th", tHash, "sth", statusTx.Hash(), "val", statusTx.Value().Uint64(), "to", w.chain.CommitAddress(), "data", hex.EncodeToString(data))
 
 		w.current.state.Prepare(statusTx.Hash(), common.Hash{}, w.current.tcount)
 		w.current.privateState.Prepare(statusTx.Hash(), common.Hash{}, w.current.tcount)

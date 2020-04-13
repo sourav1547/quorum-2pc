@@ -35,8 +35,9 @@ type PendingStateEvent struct{}
 // NewMinedBlockEvent is posted when a block has been imported.
 type NewMinedBlockEvent struct{ Block *types.Block }
 
-// NewRefBlockEvent is posted when new reference blocks are added to the chain
-type NewRefBlockEvent struct{ Start, End uint64 }
+// TxPromotedEvent is posted when all commits for a cross-shard
+// shard transaction has been received
+type TxPromotedEvent struct{ PromHashes []common.Hash }
 
 // ForeignDataEvent is posted when data download is complete
 type ForeignDataEvent struct{}
@@ -54,4 +55,7 @@ type ChainSideEvent struct {
 	Block *types.Block
 }
 
-type ChainHeadEvent struct{ Block *types.Block }
+type ChainHeadEvent struct {
+	Block      *types.Block
+	PromHashes []common.Hash
+}

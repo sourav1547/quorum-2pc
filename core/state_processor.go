@@ -69,6 +69,10 @@ func (p *StateProcessor) Process(block *types.Block, statedb, privateState *stat
 		privateReceipts types.Receipts
 		txType          uint64
 		ccount          = uint64(0)
+		elemSize        = 32
+		u64Offset       = 24
+		croot           = block.Root()
+		myshard         = p.bc.MyShard()
 	)
 	// Mutate the block and state according to any hard-fork specs
 	if p.config.DAOForkSupport && p.config.DAOForkBlock != nil && p.config.DAOForkBlock.Cmp(block.Number()) == 0 {
@@ -139,13 +143,28 @@ func (p *StateProcessor) Process(block *types.Block, statedb, privateState *stat
 		} else if txType == types.LocalDecision {
 			index := 4
 			data := tx.Data()
-			tHash := common.BytesToHash(data[index : index+32])
-			status := binary.BigEndian.Uint64(data[index+24:])
+			index += elemSize
+			tHash := common.BytesToHash(data[index : index+elemSize])
+			index += elemSize
+			status := binary.BigEndian.Uint64(data[index+u64Offset : index+elemSize])
+			decision := status == uint64(1)
 			// status: 1==commit, 0==abort
-			if status == uint64(1) {
+			if decision {
 				p.bc.crossTxsMu.RLock()
-				keyVal := p.bc.pendingCrossTxs[tHash].Keyval
+				tcb, tok := p.bc.pendingCrossTxs[tHash]
+				if !tok {
+					p.bc.crossTxsMu.RUnlock()
+					continue
+				}
 				p.bc.crossTxsMu.RUnlock()
+
+				commit := &types.TCommit{TxHash: tHash, Shard: myshard, Status: decision, StateRoot: croot}
+				tcb.AddTCommit(commit)
+				tcb.UpdateLocalStatus(myshard)
+
+				tcb.TxControlMu.RLock()
+				keyVal := tcb.Keyval
+				tcb.TxControlMu.RUnlock()
 
 				for addr, ckeys := range keyVal {
 					p.bc.lockedAddrMu.Lock()
@@ -161,6 +180,13 @@ func (p *StateProcessor) Process(block *types.Block, statedb, privateState *stat
 					}
 					alock.ClockMu.Unlock()
 				}
+			} else {
+				p.bc.crossTxsMu.Lock()
+				if _, tok := p.bc.pendingCrossTxs[tHash]; tok {
+					log.Info("@pc, Deleting cross-tx data", "thash", tHash, "shard", p.bc.MyShard(), "decision", decision)
+					delete(p.bc.pendingCrossTxs, tHash)
+				}
+				p.bc.crossTxsMu.Unlock()
 			}
 			ccount++
 		}
