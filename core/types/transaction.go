@@ -692,7 +692,7 @@ func (tcb *TxControl) InitTxControl(myshard, txID uint64, ctx *CrossTx) {
 			if _, cok := tcb.AddrToShard[caddr]; !cok {
 				tcb.AddrToShard[caddr] = shard
 				tcb.Keyval[caddr] = &CKeys{Addr: caddr}
-				log.Debug("@ds adding keys to KeyVal", "addr", caddr, "shard", shard)
+				log.Info("@ds adding keys to KeyVal", "addr", caddr, "shard", shard)
 			}
 			for _, key := range contract.Keys {
 				tcb.Keyval[caddr].AddKey(key)

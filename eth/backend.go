@@ -75,7 +75,7 @@ type Ethereum struct {
 
 	refCrossTxs     map[uint64][]common.Hash // RefChain
 	refCrossMu      sync.RWMutex
-	promCrossTxs    []common.Hash //Promoted Transactions
+	promCrossTxs    map[common.Hash]bool //Promoted Transactions
 	promCrossMu     sync.RWMutex
 	pendingCrossTxs map[common.Hash]*types.TxControl // Pending Cross shard transactions
 	crossTxsMu      sync.RWMutex                     // Lock for pendingCrossTs
@@ -201,7 +201,7 @@ func New(ctx *node.ServiceContext, config *Config) (*Ethereum, error) {
 		pendingCrossTxs: make(map[common.Hash]*types.TxControl),
 		refCrossTxs:     make(map[uint64][]common.Hash),
 		lockedAddr:      make(map[common.Address]*types.CLock),
-		promCrossTxs:    []common.Hash{},
+		promCrossTxs:    make(map[common.Hash]bool),
 	}
 
 	// To initialize address with shard

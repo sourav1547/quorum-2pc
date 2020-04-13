@@ -126,7 +126,7 @@ type BlockChain struct {
 	crossTxsMu      sync.RWMutex
 	refCrossTxs     map[uint64][]common.Hash
 	refCrossMu      sync.RWMutex
-	promCrossTxs    []common.Hash
+	promCrossTxs    map[common.Hash]bool
 	promCrossMu     sync.RWMutex
 	lockedAddr      map[common.Address]*types.CLock
 	lockedAddrMu    sync.RWMutex
@@ -137,15 +137,14 @@ type BlockChain struct {
 	triegc *prque.Prque   // Priority queue mapping block numbers to tries to gc
 	gcproc time.Duration  // Accumulates canonical block processing for trie dumping
 
-	hc              *HeaderChain
-	rmLogsFeed      event.Feed
-	chainFeed       event.Feed
-	chainSideFeed   event.Feed
-	chainHeadFeed   event.Feed
-	foreignDataFeed event.Feed
-	logsFeed        event.Feed
-	scope           event.SubscriptionScope
-	genesisBlock    *types.Block
+	hc            *HeaderChain
+	rmLogsFeed    event.Feed
+	chainFeed     event.Feed
+	chainSideFeed event.Feed
+	chainHeadFeed event.Feed
+	logsFeed      event.Feed
+	scope         event.SubscriptionScope
+	genesisBlock  *types.Block
 
 	mu      sync.RWMutex // global mutex for locking chain operations
 	chainmu sync.RWMutex // blockchain insertion lock
@@ -182,7 +181,7 @@ type BlockChain struct {
 // NewBlockChain returns a fully initialised block chain using information
 // available in the database. It initialises the default Ethereum Validator and
 // Processor.
-func NewBlockChain(db ethdb.Database, cacheConfig *CacheConfig, chainConfig *params.ChainConfig, engine consensus.Engine, vmConfig vm.Config, shouldPreserve func(block *types.Block) bool, ref bool, shard, numShard uint64, pendingCrossTxs map[common.Hash]*types.TxControl, crossTxMu sync.RWMutex, refCrossTxs map[uint64][]common.Hash, refCrossMu sync.RWMutex, promCrossTxs []common.Hash, promCrossMu sync.RWMutex, lockedAddr map[common.Address]*types.CLock, lockedAddrMu sync.RWMutex) (*BlockChain, error) {
+func NewBlockChain(db ethdb.Database, cacheConfig *CacheConfig, chainConfig *params.ChainConfig, engine consensus.Engine, vmConfig vm.Config, shouldPreserve func(block *types.Block) bool, ref bool, shard, numShard uint64, pendingCrossTxs map[common.Hash]*types.TxControl, crossTxMu sync.RWMutex, refCrossTxs map[uint64][]common.Hash, refCrossMu sync.RWMutex, promCrossTxs map[common.Hash]bool, promCrossMu sync.RWMutex, lockedAddr map[common.Address]*types.CLock, lockedAddrMu sync.RWMutex) (*BlockChain, error) {
 	if cacheConfig == nil {
 		cacheConfig = &CacheConfig{
 			TrieNodeLimit: 256,
@@ -1383,31 +1382,26 @@ func (bc *BlockChain) insertChain(chain types.Blocks) (int, []interface{}, []*ty
 		}
 		// /Quorum
 
-		/** @sourav, this needs to be fixed
-		startRef := bc.GetBlockByHash(block.ParentHash()).RefNumberU64() + uint64(0)
-		currRef := block.RefNumberU64()
 		if !bc.ref && bc.myshard > uint64(0) {
-			refNum := startRef
-			for refNum <= currRef {
-				bc.foreignDataMu.RLock()
-				dc := bc.foreignData[refNum]
-				bc.foreignDataMu.RUnlock()
-				status := false
-				if dc != nil {
-					dc.DataCacheMu.RLock()
-					status = dc.Status
-					dc.DataCacheMu.RUnlock()
-				}
-				if !status {
-					select {
-					case <-bc.foreignDataCh:
-						continue
+			for _, tx := range block.Transactions() {
+				if tx.TxType() == types.CrossShardLocal {
+					tHash := tx.Hash()
+					bc.crossTxsMu.RLock()
+					tcb := bc.pendingCrossTxs[tHash]
+					bc.crossTxsMu.RUnlock()
+
+					tcb.TxControlMu.RLock()
+					if !tcb.Status {
+						tcb.TxControlMu.RUnlock()
+						select {
+						case <-bc.foreignDataCh:
+							continue
+						}
 					}
+					tcb.TxControlMu.RUnlock()
 				}
-				refNum++
 			}
 		}
-		*/
 
 		// Process block using the parent state as reference point.
 		receipts, privateReceipts, logs, usedGas, err := bc.processor.Process(block, state, privateState, bc.vmConfig)
@@ -1586,7 +1580,7 @@ func (bc *BlockChain) ParseBlock(block *types.Block, receipts types.Receipts) []
 				tcb, tok := bc.pendingCrossTxs[tHash]
 				bc.crossTxsMu.RUnlock()
 
-				log.Info("@pc TxnStatus received for", "thash", tHash, "shard", shard, "root", root, "decision", decision, "tok", tok)
+				log.Info("TxnStatus received for", "thash", tHash, "shard", shard, "root", root, "decision", decision, "tok", tok)
 
 				if !decision {
 					bc.crossTxsMu.Lock()
@@ -1598,10 +1592,10 @@ func (bc *BlockChain) ParseBlock(block *types.Block, receipts types.Receipts) []
 				} else {
 					if tok {
 						commit := &types.TCommit{TxHash: tHash, Shard: shard, Status: decision, StateRoot: root}
-						log.Info("@pc Added commit for", "shard", shard, "th", tHash, "status", status, "root", root)
+						log.Debug("@pc Added commit for", "shard", shard, "th", tHash, "status", status, "root", root)
 						if tcb.AddTCommit(commit) {
 							promHashes = append(promHashes, tHash)
-							log.Info("@pc Ready for data Download!", "thash", tHash)
+							log.Debug("@pc Ready for data Download!", "thash", tHash)
 						}
 					}
 				}
@@ -1889,11 +1883,15 @@ func (bc *BlockChain) Ref() bool {
 // PostForeignDataEvent posts after downloading foreign data
 func (bc *BlockChain) PostForeignDataEvent(tHash common.Hash) {
 	log.Info("Foreign Data posted for ", "tHash", tHash)
-	// bc.foreignDataFeed.Send(ForeignDataEvent{})
-	// select {
-	// case bc.foreignDataCh <- struct{}{}:
-	// default:
-	// }
+	bc.promCrossMu.Lock()
+	defer bc.promCrossMu.Unlock()
+	if _, ok := bc.promCrossTxs[tHash]; !ok {
+		bc.promCrossTxs[tHash] = false
+	}
+	select {
+	case bc.foreignDataCh <- struct{}{}:
+	default:
+	}
 }
 
 // PostChainEvents iterates over the events generated by a chain insertion and
@@ -2105,11 +2103,6 @@ func (bc *BlockChain) SubscribeChainEvent(ch chan<- ChainEvent) event.Subscripti
 // SubscribeChainHeadEvent registers a subscription of ChainHeadEvent.
 func (bc *BlockChain) SubscribeChainHeadEvent(ch chan<- ChainHeadEvent) event.Subscription {
 	return bc.scope.Track(bc.chainHeadFeed.Subscribe(ch))
-}
-
-// SubscribeForeignDataEvent registers a foriegn data signal
-func (bc *BlockChain) SubscribeForeignDataEvent(ch chan<- ForeignDataEvent) event.Subscription {
-	return bc.scope.Track(bc.foreignDataFeed.Subscribe(ch))
 }
 
 // SubscribeChainSideEvent registers a subscription of ChainSideEvent.

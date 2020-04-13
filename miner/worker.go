@@ -157,11 +157,9 @@ type worker struct {
 	refCrossTxs map[uint64][]common.Hash
 	refCrossMu  sync.RWMutex
 
-	promCrossTxs []common.Hash
+	promCrossTxs map[common.Hash]bool
 	promCrossMu  sync.RWMutex
 
-	foreignDataCh   chan core.ForeignDataEvent
-	foreignDataSub  event.Subscription
 	crossWorkCh     chan struct{}
 	pendingResultCh chan struct{}
 	stopProcessCh   chan struct{}
@@ -226,7 +224,7 @@ type worker struct {
 	resubmitHook func(time.Duration, time.Duration) // Method to call upon updating resubmitting interval.
 }
 
-func newWorker(config *params.ChainConfig, engine consensus.Engine, eth Backend, mux *event.TypeMux, recommit time.Duration, gasFloor, gasCeil uint64, isLocalBlock func(*types.Block) bool, pendingCrossTxs map[common.Hash]*types.TxControl, crossTxsMu sync.RWMutex, refCrossTxs map[uint64][]common.Hash, refCrossMu sync.RWMutex, promCrossTxs []common.Hash, promCrossMu sync.RWMutex, lockedAddr map[common.Address]*types.CLock, lockedAddrMu sync.RWMutex) *worker {
+func newWorker(config *params.ChainConfig, engine consensus.Engine, eth Backend, mux *event.TypeMux, recommit time.Duration, gasFloor, gasCeil uint64, isLocalBlock func(*types.Block) bool, pendingCrossTxs map[common.Hash]*types.TxControl, crossTxsMu sync.RWMutex, refCrossTxs map[uint64][]common.Hash, refCrossMu sync.RWMutex, promCrossTxs map[common.Hash]bool, promCrossMu sync.RWMutex, lockedAddr map[common.Address]*types.CLock, lockedAddrMu sync.RWMutex) *worker {
 	worker := &worker{
 		config:             config,
 		engine:             engine,
@@ -261,7 +259,6 @@ func newWorker(config *params.ChainConfig, engine consensus.Engine, eth Backend,
 		cLockedAddr:        make(map[common.Address]*types.CLock),
 		refCrossTxs:        refCrossTxs,
 		refCrossMu:         refCrossMu,
-		foreignDataCh:      make(chan core.ForeignDataEvent),
 		crossWorkCh:        make(chan struct{}),
 		pendingResultCh:    make(chan struct{}),
 		stopProcessCh:      make(chan struct{}),
@@ -276,7 +273,6 @@ func newWorker(config *params.ChainConfig, engine consensus.Engine, eth Backend,
 		worker.chainHeadSub = eth.BlockChain().SubscribeChainHeadEvent(worker.chainHeadCh)
 		worker.chainSideSub = eth.BlockChain().SubscribeChainSideEvent(worker.chainSideCh)
 		worker.rChainHeadSub = eth.RefChain().SubscribeChainHeadEvent(worker.rChainHeadCh)
-		worker.foreignDataSub = eth.BlockChain().SubscribeForeignDataEvent(worker.foreignDataCh)
 
 		// Fixing the gas limit for the entire blockchain.
 		worker.gasLimit = core.CalcGasLimit(worker.chain.GetBlockByNumber(uint64(0)), worker.gasFloor, worker.gasCeil)
@@ -528,7 +524,6 @@ func (w *worker) mainLoop() {
 	defer w.chainHeadSub.Unsubscribe()
 	defer w.chainSideSub.Unsubscribe()
 	defer w.rChainHeadSub.Unsubscribe()
-	defer w.foreignDataSub.Unsubscribe()
 
 	for {
 		select {
@@ -751,25 +746,32 @@ func (w *worker) resultLoop() {
 
 					tcb.TxControlMu.RLock()
 					keyval := tcb.Keyval
+					addrToShard := tcb.AddrToShard
 					tcb.TxControlMu.RUnlock()
 
 					for addr, keys := range keyval {
-						w.lockedAddrMu.RLock()
-						aclok := w.lockedAddr[addr]
-						w.lockedAddrMu.RUnlock()
+						if shard := addrToShard[addr]; shard == myshard {
+							w.lockedAddrMu.RLock()
+							aclok := w.lockedAddr[addr]
+							w.lockedAddrMu.RUnlock()
 
-						aclok.ClockMu.Lock()
-						for _, key := range keys.Keys {
-							delete(aclok.Keys, key)
-						}
-						clockSize := len(aclok.Keys)
-						aclok.ClockMu.Unlock()
-						if clockSize == 0 {
-							w.lockedAddrMu.Lock()
-							delete(w.lockedAddr, addr)
-							w.lockedAddrMu.Unlock()
+							aclok.ClockMu.Lock()
+							for _, key := range keys.Keys {
+								delete(aclok.Keys, key)
+							}
+							clockSize := len(aclok.Keys)
+							aclok.ClockMu.Unlock()
+							if clockSize == 0 {
+								w.lockedAddrMu.Lock()
+								delete(w.lockedAddr, addr)
+								w.lockedAddrMu.Unlock()
+							}
 						}
 					}
+					w.promCrossMu.Lock()
+					delete(w.promCrossTxs, tHash)
+					w.promCrossMu.Unlock()
+
 				} else if txType == types.LocalDecision {
 					index = 4
 					data = tx.Data()
@@ -792,21 +794,24 @@ func (w *worker) resultLoop() {
 
 						tcb.TxControlMu.RLock()
 						keyVal := w.pendingCrossTxs[tHash].Keyval
+						addrToShard := tcb.AddrToShard
 						tcb.TxControlMu.RUnlock()
 
 						for addr, ckeys := range keyVal {
-							w.lockedAddrMu.Lock()
-							if _, ok := w.lockedAddr[addr]; !ok {
-								w.lockedAddr[addr] = types.NewCLock(addr)
-							}
-							alock := w.lockedAddr[addr]
-							w.lockedAddrMu.Unlock()
+							if shard := addrToShard[addr]; shard == myshard {
+								w.lockedAddrMu.Lock()
+								if _, ok := w.lockedAddr[addr]; !ok {
+									w.lockedAddr[addr] = types.NewCLock(addr)
+								}
+								alock := w.lockedAddr[addr]
+								w.lockedAddrMu.Unlock()
 
-							alock.ClockMu.Lock()
-							for _, key := range ckeys.Keys {
-								alock.Keys[key] = false
+								alock.ClockMu.Lock()
+								for _, key := range ckeys.Keys {
+									alock.Keys[key] = false
+								}
+								alock.ClockMu.Unlock()
 							}
-							alock.ClockMu.Unlock()
 						}
 
 						commit := &types.TCommit{TxHash: tHash, Shard: myshard, Status: decision, StateRoot: croot}
@@ -816,7 +821,6 @@ func (w *worker) resultLoop() {
 					} else {
 						w.crossTxsMu.Lock()
 						if _, tok := w.pendingCrossTxs[tHash]; tok {
-							log.Info("@pc, Deleting cross-tx data", "thash", tHash, "shard", w.eth.MyShard(), "decision", decision)
 							delete(w.pendingCrossTxs, tHash)
 						}
 						w.crossTxsMu.Unlock()
@@ -1031,7 +1035,8 @@ func (w *worker) getPromotedTransactions() []common.Hash {
 	defer w.promCrossMu.RUnlock()
 	var pTxs []common.Hash
 	if len(w.promCrossTxs) > 0 {
-		for _, th := range w.promCrossTxs {
+		for th := range w.promCrossTxs {
+			// @sourav, todo: we can remove the following check!
 			if w.pendingCrossTxs[th].Status {
 				pTxs = append(pTxs, th)
 			}

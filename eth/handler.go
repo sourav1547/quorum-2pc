@@ -955,7 +955,7 @@ func (pm *ProtocolManager) handleMsg(p *peer) error {
 		root := request.Root
 		count := request.Count
 		results := pm.blockchain.StateData(root, request.Keys)
-		log.Info("Received request from", "pshard", p.Shard(), "tHash", tHash, "root", root)
+		log.Debug("Received request from", "pshard", p.Shard(), "tHash", tHash, "root", root)
 
 		err := p.SendDataResponse(tHash, count, root, results)
 		if err != nil {
@@ -970,7 +970,7 @@ func (pm *ProtocolManager) handleMsg(p *peer) error {
 		tHash := request.TxHash
 		root := request.Root
 		vals := request.Vals
-		log.Info("Received response from", "pshard", p.Shard(), "tHash", tHash, "root", root)
+		log.Debug("Received response from", "pshard", p.Shard(), "tHash", tHash, "root", root)
 
 		go pm.AddFetchedData(tHash, p.Shard(), vals)
 

@@ -73,6 +73,7 @@ func (p *StateProcessor) Process(block *types.Block, statedb, privateState *stat
 		u64Offset       = 24
 		croot           = block.Root()
 		myshard         = p.bc.MyShard()
+		tHash           common.Hash
 	)
 	// Mutate the block and state according to any hard-fork specs
 	if p.config.DAOForkSupport && p.config.DAOForkBlock != nil && p.config.DAOForkBlock.Cmp(block.Number()) == 0 {
@@ -80,66 +81,55 @@ func (p *StateProcessor) Process(block *types.Block, statedb, privateState *stat
 	}
 	// Iterate over and process the individual transactions
 	for i, tx := range block.Transactions() {
-		statedb.Prepare(tx.Hash(), block.Hash(), i)
-		privateState.Prepare(tx.Hash(), block.Hash(), i)
+		txType = tx.TxType()
+		tHash = tx.Hash()
+		statedb.Prepare(tHash, block.Hash(), i)
+		privateState.Prepare(tHash, block.Hash(), i)
 
 		snap := statedb.Snapshot()
 		psnap := privateState.Snapshot()
 
-		/*
-			if tx.TxType() != types.CrossShardLocal {
-				tcb = nil
-			} else {
-				for curr <= end {
-					found := false
-					// @sourav, todo: Add locks for pendingCrossTxs map
-					for _, ctx := range p.bc.pendingCrossTxs[curr].Txs {
-						if tx.Hash() == ctx.Tx.Hash() {
-							p.bc.foreignDataMu.RLock()
-							tcb = p.bc.foreignData[curr]
-							p.bc.foreignDataMu.RUnlock()
-							found = true
-							log.Debug("Cross shard Transaction with", "hash", tx.Hash(), "refNum", curr)
-							break
-						}
-					}
-					if found {
-						break
-					}
-					curr++
-				}
-			}
-		*/
+		if txType == types.CrossShardLocal {
+			p.bc.crossTxsMu.RLock()
+			tcb = p.bc.pendingCrossTxs[tHash]
+			p.bc.crossTxsMu.RUnlock()
+		} else {
+			tcb = nil
+		}
 
 		// s1 := statedb.Copy()
 		receipt, privateReceipt, _, err := ApplyTransaction(p.config, p.bc, nil, gp, tcb, statedb, privateState, header, tx, usedGas, cfg)
 		// s2 := statedb.Copy()
 
-		txType = tx.TxType()
-
 		// Unlocking keys
 		if txType == types.CrossShardLocal {
 			tcb.TxControlMu.RLock()
 			keyval := tcb.Keyval
+			addrToShard := tcb.AddrToShard
 			tcb.TxControlMu.RUnlock()
 
 			for addr, keys := range keyval {
-				p.bc.lockedAddrMu.RLock()
-				aclok := p.bc.lockedAddr[addr]
-				p.bc.lockedAddrMu.RUnlock()
+				if shard := addrToShard[addr]; shard == myshard {
+					p.bc.lockedAddrMu.RLock()
+					aclok := p.bc.lockedAddr[addr]
+					p.bc.lockedAddrMu.RUnlock()
 
-				aclok.ClockMu.Lock()
-				for _, key := range keys.Keys {
-					delete(aclok.Keys, key)
-				}
-				clockSize := len(aclok.Keys)
-				aclok.ClockMu.Unlock()
-				if clockSize == 0 {
-					p.bc.lockedAddrMu.Lock()
-					delete(p.bc.lockedAddr, addr)
-					p.bc.lockedAddrMu.Unlock()
+					aclok.ClockMu.Lock()
+					for _, key := range keys.Keys {
+						delete(aclok.Keys, key)
+					}
+					clockSize := len(aclok.Keys)
+					aclok.ClockMu.Unlock()
+					if clockSize == 0 {
+						p.bc.lockedAddrMu.Lock()
+						delete(p.bc.lockedAddr, addr)
+						p.bc.lockedAddrMu.Unlock()
+					}
 				}
 			}
+			p.bc.promCrossMu.Lock()
+			delete(p.bc.promCrossTxs, tHash)
+			p.bc.promCrossMu.Unlock()
 		} else if txType == types.LocalDecision {
 			index := 4
 			data := tx.Data()
@@ -164,26 +154,28 @@ func (p *StateProcessor) Process(block *types.Block, statedb, privateState *stat
 
 				tcb.TxControlMu.RLock()
 				keyVal := tcb.Keyval
+				addrToShard := tcb.AddrToShard
 				tcb.TxControlMu.RUnlock()
 
 				for addr, ckeys := range keyVal {
-					p.bc.lockedAddrMu.Lock()
-					if _, ok := p.bc.lockedAddr[addr]; !ok {
-						p.bc.lockedAddr[addr] = types.NewCLock(addr)
-					}
-					alock := p.bc.lockedAddr[addr]
-					p.bc.lockedAddrMu.Unlock()
+					if shard := addrToShard[addr]; shard == myshard {
+						p.bc.lockedAddrMu.Lock()
+						if _, ok := p.bc.lockedAddr[addr]; !ok {
+							p.bc.lockedAddr[addr] = types.NewCLock(addr)
+						}
+						alock := p.bc.lockedAddr[addr]
+						p.bc.lockedAddrMu.Unlock()
 
-					alock.ClockMu.Lock()
-					for _, key := range ckeys.Keys {
-						alock.Keys[key] = false
+						alock.ClockMu.Lock()
+						for _, key := range ckeys.Keys {
+							alock.Keys[key] = false
+						}
+						alock.ClockMu.Unlock()
 					}
-					alock.ClockMu.Unlock()
 				}
 			} else {
 				p.bc.crossTxsMu.Lock()
 				if _, tok := p.bc.pendingCrossTxs[tHash]; tok {
-					log.Info("@pc, Deleting cross-tx data", "thash", tHash, "shard", p.bc.MyShard(), "decision", decision)
 					delete(p.bc.pendingCrossTxs, tHash)
 				}
 				p.bc.crossTxsMu.Unlock()

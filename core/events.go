@@ -39,9 +39,6 @@ type NewMinedBlockEvent struct{ Block *types.Block }
 // shard transaction has been received
 type TxPromotedEvent struct{ PromHashes []common.Hash }
 
-// ForeignDataEvent is posted when data download is complete
-type ForeignDataEvent struct{}
-
 // RemovedLogsEvent is posted when a reorg happens
 type RemovedLogsEvent struct{ Logs []*types.Log }
 
