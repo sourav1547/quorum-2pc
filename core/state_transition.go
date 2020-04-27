@@ -279,7 +279,8 @@ func (st *StateTransition) TransitionDb() (ret []byte, usedGas uint64, failed bo
 					} else {
 						st.tcb.TxControlMu.Lock()
 						if st.tcb.Values[addr] == nil {
-							log.Warn("Values in datache is nill for", "addr", addr)
+							st.tcb.TxControlMu.Unlock()
+							log.Warn("Values in tcb is nil for", "addr", addr)
 							return nil, 0, false, errNilValueFound
 						} else {
 							st.tcb.Values[addr].Nonce = st.tcb.Values[addr].Nonce + uint64(1)

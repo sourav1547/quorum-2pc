@@ -27,6 +27,7 @@ var (
 	ErrContractAddressCollision = errors.New("contract address collision")
 
 	ErrAddressNotFound         = errors.New("address not found in datacache")
+	ErrAddressLocked           = errors.New("address locked by a cross-shard transaction")
 	ErrReadOnlyValueTransfer   = errors.New("VM in read-only mode. Value transfer prohibited.")
 	ErrNoCompatibleInterpreter = errors.New("no compatible interpreter")
 )

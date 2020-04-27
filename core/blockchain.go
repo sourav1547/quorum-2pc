@@ -130,6 +130,8 @@ type BlockChain struct {
 	promCrossMu     sync.RWMutex
 	lockedAddr      map[common.Address]*types.CLock
 	lockedAddrMu    sync.RWMutex
+	thLocked        map[common.Hash]bool
+	thLockedMu      sync.RWMutex
 
 	foreignDataCh chan struct{}
 
@@ -181,7 +183,7 @@ type BlockChain struct {
 // NewBlockChain returns a fully initialised block chain using information
 // available in the database. It initialises the default Ethereum Validator and
 // Processor.
-func NewBlockChain(db ethdb.Database, cacheConfig *CacheConfig, chainConfig *params.ChainConfig, engine consensus.Engine, vmConfig vm.Config, shouldPreserve func(block *types.Block) bool, ref bool, shard, numShard uint64, pendingCrossTxs map[common.Hash]*types.TxControl, crossTxMu sync.RWMutex, refCrossTxs map[uint64][]common.Hash, refCrossMu sync.RWMutex, promCrossTxs map[common.Hash]bool, promCrossMu sync.RWMutex, lockedAddr map[common.Address]*types.CLock, lockedAddrMu sync.RWMutex) (*BlockChain, error) {
+func NewBlockChain(db ethdb.Database, cacheConfig *CacheConfig, chainConfig *params.ChainConfig, engine consensus.Engine, vmConfig vm.Config, shouldPreserve func(block *types.Block) bool, ref bool, shard, numShard uint64, pendingCrossTxs map[common.Hash]*types.TxControl, crossTxMu sync.RWMutex, refCrossTxs map[uint64][]common.Hash, refCrossMu sync.RWMutex, promCrossTxs map[common.Hash]bool, promCrossMu sync.RWMutex, lockedAddr map[common.Address]*types.CLock, lockedAddrMu sync.RWMutex, thLocked map[common.Hash]bool, thLockedMu sync.RWMutex) (*BlockChain, error) {
 	if cacheConfig == nil {
 		cacheConfig = &CacheConfig{
 			TrieNodeLimit: 256,
@@ -224,6 +226,8 @@ func NewBlockChain(db ethdb.Database, cacheConfig *CacheConfig, chainConfig *par
 		promCrossMu:       promCrossMu,
 		lockedAddr:        lockedAddr,
 		lockedAddrMu:      lockedAddrMu,
+		thLocked:          thLocked,
+		thLockedMu:        thLockedMu,
 		foreignDataCh:     make(chan struct{}),
 	}
 	bc.SetValidator(NewBlockValidator(chainConfig, bc, engine))
@@ -509,6 +513,9 @@ func (bc *BlockChain) StateAt(root common.Hash) (*state.StateDB, *state.StateDB,
 
 // StateData returns data at a particular root
 func (bc *BlockChain) StateData(root common.Hash, keys []*types.CKeys) []*types.KeyVal {
+	// Acquiring lock to avoid concurrent modifications
+	bc.mu.RLock()
+	defer bc.mu.RUnlock()
 	pstate, err := state.New(root, bc.stateCache)
 	if err != nil {
 		log.Error("Error in fetching state", "error", err)
@@ -1503,6 +1510,7 @@ func (bc *BlockChain) ParseBlock(block *types.Block, receipts types.Receipts) []
 		promHashes  []common.Hash
 	)
 
+	// Create a holder for the new block from reference chain.
 	if _, ok := bc.refCrossTxs[refNum]; !ok && refNum > uint64(0) {
 		bc.refCrossTxs[refNum] = []common.Hash{}
 	}
@@ -1513,11 +1521,18 @@ func (bc *BlockChain) ParseBlock(block *types.Block, receipts types.Receipts) []
 		receipt := receipts[i]
 		rStatus = receipt.Status == uint64(1)
 		txStatus = false
+
+		// Procedd if and only if the transaction status is 1
 		if rStatus && receipt.Logs != nil {
+			// check whether the transaction is a cross-shard trasnaction or a
+			// status trasnaction from any shard.
 			if txType == types.CrossShard || txType == types.TxnStatus {
 				index := 0
+				// Extracting transaction execution status information.
 				eventOutput = binary.BigEndian.Uint64(receipt.Logs[0].Data[index+u64Offset : index+elemSize])
 				txStatus = eventOutput == uint64(1)
+				// If cross-shard trasnaction, extract the transaction id i.e., a global
+				// unique id for every cross-shard transaction.
 				if txType == types.CrossShard {
 					index += elemSize
 					txID = binary.BigEndian.Uint64(receipt.Logs[0].Data[index+u64Offset : index+elemSize])
@@ -1539,15 +1554,17 @@ func (bc *BlockChain) ParseBlock(block *types.Block, receipts types.Receipts) []
 					startIndex := (2+1+numShards)*elemSize + elemSize // Last 32 bytes to avoid string length
 					crossTx := bc.ParseCrossTxData(uint16(numShards), data[2+startIndex:])
 					crossTx.BlockNum = block.Number()
-					// ctxHash := tx.Hash()
-					ctxHash := crossTx.Tx.Hash()
+					ctxHash := crossTx.Tx.Hash() // We use hash of the cross-shard transaction as the data.
 
+					// If have not seen a transaction with same hash
 					if _, ok := bc.pendingCrossTxs[ctxHash]; !ok {
+						// Store new transaction contrl for every cross-shard transaction
 						bc.crossTxsMu.Lock()
 						bc.pendingCrossTxs[ctxHash] = types.NewTxControl(refNum, false)
 						bc.pendingCrossTxs[ctxHash].InitTxControl(bc.myshard, txID, crossTx)
 						bc.crossTxsMu.Unlock()
 
+						// A map between block number and transaction hash
 						bc.refCrossMu.Lock()
 						bc.refCrossTxs[refNum] = append(bc.refCrossTxs[refNum], ctxHash)
 						bc.refCrossMu.Unlock()
@@ -1565,6 +1582,8 @@ func (bc *BlockChain) ParseBlock(block *types.Block, receipts types.Receipts) []
 					decision bool
 					tcb      *types.TxControl
 				)
+				// Structure of decision created by each shard
+				// <shard || txID || tHash || status || root>
 				shard = binary.BigEndian.Uint64(data[index+u64Offset : index+elemSize])
 				index += elemSize
 				txID = binary.BigEndian.Uint64(data[index+u64Offset : index+elemSize])
@@ -1580,22 +1599,64 @@ func (bc *BlockChain) ParseBlock(block *types.Block, receipts types.Receipts) []
 				tcb, tok := bc.pendingCrossTxs[tHash]
 				bc.crossTxsMu.RUnlock()
 
-				log.Info("TxnStatus received for", "thash", tHash, "shard", shard, "root", root, "decision", decision, "tok", tok)
+				log.Debug("TxnStatus received for", "thash", tHash, "shard", shard, "root", root, "decision", decision, "tok", tok)
 
 				if !decision {
-					bc.crossTxsMu.Lock()
+					// If a shard decides to abort, we delete the corresponding the cross-shard
+					// transaction block.
 					if tok {
 						log.Info("@pc, Deleting cross-tx data", "thash", tHash, "shard", shard, "decision", decision)
+						bc.crossTxsMu.Lock()
+
+						bc.thLockedMu.RLock()
+						_, sok := bc.thLocked[tHash]
+						bc.thLockedMu.RUnlock()
+
+						if sok {
+							tcb.TxControlMu.RLock()
+							keyval := tcb.Keyval
+							tcb.TxControlMu.RUnlock()
+
+							for addr, keys := range keyval {
+								bc.lockedAddrMu.RLock()
+								aclok, aok := bc.lockedAddr[addr]
+								bc.lockedAddrMu.RUnlock()
+
+								if aok {
+									aclok.ClockMu.Lock()
+									for _, key := range keys.Keys {
+										delete(aclok.Keys, key)
+									}
+									clockSize := len(aclok.Keys)
+									aclok.ClockMu.Unlock()
+									if clockSize == 0 {
+										bc.lockedAddrMu.Lock()
+										delete(bc.lockedAddr, addr)
+										bc.lockedAddrMu.Unlock()
+									}
+								}
+							}
+							bc.thLockedMu.Lock()
+							delete(bc.thLocked, tHash)
+							bc.thLockedMu.Unlock()
+						}
 						delete(bc.pendingCrossTxs, tHash)
+						bc.crossTxsMu.Unlock()
 					}
-					bc.crossTxsMu.Unlock()
 				} else {
+					// If the shard decides to commit, add an appropriate commit for the shard!
 					if tok {
 						commit := &types.TCommit{TxHash: tHash, Shard: shard, Status: decision, StateRoot: root}
 						log.Debug("@pc Added commit for", "shard", shard, "th", tHash, "status", status, "root", root)
+						// If all associated shard reply with commit message, promote the
+						// transaction for execution.
 						if tcb.AddTCommit(commit) {
 							promHashes = append(promHashes, tHash)
 							log.Debug("@pc Ready for data Download!", "thash", tHash)
+						}
+						// Updating data imformation about local shard!
+						if shard == bc.myshard {
+							tcb.UpdateLocalStatus(shard)
 						}
 					}
 				}
@@ -1677,6 +1738,7 @@ func (bc *BlockChain) ParseCrossTxData(numShard uint16, data []byte) *types.Cros
 	startIndex = startIndex + uint16(4)
 	tx := types.NewTransaction(types.CrossShardLocal, uint64(nonce), uint64(0), receiver, big.NewInt(int64(value)), gasLimit, big.NewInt(int64(gasPrice)), data[startIndex:])
 
+	// @sourav, todo: appropriately add the signature extraction procedure
 	crossTx.SetTransaction(tx)
 	crossTx.Tx.SetFrom(types.HomesteadSigner{}, sender)
 
@@ -1882,7 +1944,7 @@ func (bc *BlockChain) Ref() bool {
 
 // PostForeignDataEvent posts after downloading foreign data
 func (bc *BlockChain) PostForeignDataEvent(tHash common.Hash) {
-	log.Info("Foreign Data posted for ", "tHash", tHash)
+	log.Debug("Foreign Data posted for ", "tHash", tHash)
 	bc.promCrossMu.Lock()
 	defer bc.promCrossMu.Unlock()
 	if _, ok := bc.promCrossTxs[tHash]; !ok {

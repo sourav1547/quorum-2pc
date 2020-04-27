@@ -641,10 +641,10 @@ func NewTxControl(rNum uint64, status bool) *TxControl {
 }
 
 // AddData adds data corresponding to keys
-func (tcb *TxControl) AddData(shard uint64, vals []*KeyVal) {
+func (tcb *TxControl) AddData(shard uint64, vals []*KeyVal) bool {
 	tcb.TxControlMu.Lock()
 	defer tcb.TxControlMu.Unlock()
-	if !tcb.ShardStatus[shard] {
+	if !tcb.ShardStatus[shard] && len(vals) > 0 {
 		for _, values := range vals {
 			caddr := values.Addr
 			cdata := &CData{
@@ -669,8 +669,10 @@ func (tcb *TxControl) AddData(shard uint64, vals []*KeyVal) {
 		tcb.Received++
 		if tcb.Received == tcb.Required {
 			tcb.Status = true
+			return true
 		}
 	}
+	return false
 }
 
 // InitTxControl adds transaction detail
@@ -692,7 +694,6 @@ func (tcb *TxControl) InitTxControl(myshard, txID uint64, ctx *CrossTx) {
 			if _, cok := tcb.AddrToShard[caddr]; !cok {
 				tcb.AddrToShard[caddr] = shard
 				tcb.Keyval[caddr] = &CKeys{Addr: caddr}
-				log.Info("@ds adding keys to KeyVal", "addr", caddr, "shard", shard)
 			}
 			for _, key := range contract.Keys {
 				tcb.Keyval[caddr].AddKey(key)

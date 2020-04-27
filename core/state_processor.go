@@ -98,7 +98,7 @@ func (p *StateProcessor) Process(block *types.Block, statedb, privateState *stat
 		}
 
 		// s1 := statedb.Copy()
-		receipt, privateReceipt, _, err := ApplyTransaction(p.config, p.bc, nil, gp, tcb, statedb, privateState, header, tx, usedGas, cfg)
+		receipt, privateReceipt, _, err := ApplyTransaction(p.config, p.bc, nil, gp, tcb, p.bc.lockedAddr, nil, statedb, privateState, header, tx, usedGas, cfg)
 		// s2 := statedb.Copy()
 
 		// Unlocking keys
@@ -130,6 +130,9 @@ func (p *StateProcessor) Process(block *types.Block, statedb, privateState *stat
 			p.bc.promCrossMu.Lock()
 			delete(p.bc.promCrossTxs, tHash)
 			p.bc.promCrossMu.Unlock()
+
+			log.Info("Executed cross-shard transaction", "thash", tHash, "bn", block.NumberU64())
+
 		} else if txType == types.LocalDecision {
 			index := 4
 			data := tx.Data()
@@ -138,7 +141,8 @@ func (p *StateProcessor) Process(block *types.Block, statedb, privateState *stat
 			index += elemSize
 			status := binary.BigEndian.Uint64(data[index+u64Offset : index+elemSize])
 			decision := status == uint64(1)
-			// status: 1==commit, 0==abort
+
+			log.Info("@cs Local Decision for", "th", tHash, "status", decision, "bn", block.NumberU64(), "sTh", tx.Hash())
 			if decision {
 				p.bc.crossTxsMu.RLock()
 				tcb, tok := p.bc.pendingCrossTxs[tHash]
@@ -173,13 +177,23 @@ func (p *StateProcessor) Process(block *types.Block, statedb, privateState *stat
 						alock.ClockMu.Unlock()
 					}
 				}
-			} else {
+
+				// Keeping a marker that the transaction locked additional values
+				p.bc.thLockedMu.Lock()
+				if _, thok := p.bc.thLocked[tHash]; !thok {
+					p.bc.thLocked[tHash] = true
+				}
+				p.bc.thLockedMu.Unlock()
+			}
+			/**
+			else {
 				p.bc.crossTxsMu.Lock()
 				if _, tok := p.bc.pendingCrossTxs[tHash]; tok {
 					delete(p.bc.pendingCrossTxs, tHash)
 				}
 				p.bc.crossTxsMu.Unlock()
 			}
+			*/
 			ccount++
 		}
 
@@ -222,7 +236,7 @@ func (p *StateProcessor) Process(block *types.Block, statedb, privateState *stat
 // and uses the input parameters for its environment. It returns the receipt
 // for the transaction, gas used and an error if the transaction failed,
 // indicating the block was invalid.
-func ApplyTransaction(config *params.ChainConfig, bc *BlockChain, author *common.Address, gp *GasPool, tcb *types.TxControl, statedb, privateState *state.StateDB, header *types.Header, tx *types.Transaction, usedGas *uint64, cfg vm.Config) (*types.Receipt, *types.Receipt, uint64, error) {
+func ApplyTransaction(config *params.ChainConfig, bc *BlockChain, author *common.Address, gp *GasPool, tcb *types.TxControl, gLockedAddr, cUnlockedAddr map[common.Address]*types.CLock, statedb, privateState *state.StateDB, header *types.Header, tx *types.Transaction, usedGas *uint64, cfg vm.Config) (*types.Receipt, *types.Receipt, uint64, error) {
 	if !config.IsQuorum || !tx.IsPrivate() {
 		privateState = statedb
 	}
@@ -244,7 +258,7 @@ func ApplyTransaction(config *params.ChainConfig, bc *BlockChain, author *common
 	context := NewEVMContext(msg, header, bc, author)
 	// Create a new environment which holds all relevant information
 	// about the transaction and calling mechanisms.
-	vmenv := vm.NewEVM(context, tcb, statedb, privateState, config, cfg)
+	vmenv := vm.NewEVM(context, tcb, gLockedAddr, cUnlockedAddr, statedb, privateState, config, cfg)
 
 	// Apply the transaction to the current state (included in the env)
 	_, gas, failed, err := ApplyMessage(vmenv, msg, gp)

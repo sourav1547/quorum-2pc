@@ -1526,8 +1526,9 @@ func MakeChain(ctx *cli.Context, stack *node.Node) (chain *core.BlockChain, chai
 		promLock sync.RWMutex
 		refLock  sync.RWMutex
 		addrLock sync.RWMutex
+		thLock   sync.RWMutex
 	)
-	chain, err = core.NewBlockChain(chainDb, cache, config, engine, vmcfg, nil, false, uint64(0), uint64(1), nil, clock, nil, promLock, nil, refLock, nil, addrLock)
+	chain, err = core.NewBlockChain(chainDb, cache, config, engine, vmcfg, nil, false, uint64(0), uint64(1), nil, clock, nil, promLock, nil, refLock, nil, addrLock, nil, thLock)
 	if err != nil {
 		Fatalf("Can't create BlockChain: %v", err)
 	}

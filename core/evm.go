@@ -87,7 +87,7 @@ func GetHashFn(ref *types.Header, chain ChainContext) func(n uint64) common.Hash
 
 // CanTransfer checks whether there are enough funds in the address' account to make a transfer.
 // This does not take the necessary gas in to account to make the transfer valid.
-func CanTransfer(tcb *types.TxControl, bshard uint64, db vm.StateDB, addr common.Address, amount *big.Int) bool {
+func CanTransfer(tcb *types.TxControl, gLockedAddr, cUnlockedAddr map[common.Address]*types.CLock, bshard uint64, db vm.StateDB, addr common.Address, amount *big.Int) bool {
 	var balance *big.Int
 	if tcb != nil {
 		shard := tcb.AddrToShard[addr]
@@ -98,6 +98,29 @@ func CanTransfer(tcb *types.TxControl, bshard uint64, db vm.StateDB, addr common
 		}
 		return balance.Cmp(amount) >= 0
 	}
+
+	// @sourav, todo: decide whether to put these checks or
+	// not. We can decide to ignore this check if needed!
+	// We will have to anyway check during data access.
+
+	// Check if the locks are already held for any keys
+	// avoid executing new transactions involving the
+	// same user.
+	/*
+		if gLock, gaok := gLockedAddr[addr]; gaok {
+			if _, uaok := cUnlockedAddr[addr]; !uaok {
+				log.Info("@cs, address locked in global lock!", "addr", addr)
+				return false
+			}
+			uLock := cUnlockedAddr[addr]
+			for gKey := range gLock.Keys {
+				if _, kok := uLock.Keys[gKey]; !kok {
+					log.Info("@cs, key locked for address", "addr", addr)
+					return false
+				}
+			}
+		}
+	*/
 	return db.GetBalance(addr).Cmp(amount) >= 0
 }
 

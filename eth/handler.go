@@ -970,7 +970,7 @@ func (pm *ProtocolManager) handleMsg(p *peer) error {
 		tHash := request.TxHash
 		root := request.Root
 		vals := request.Vals
-		log.Debug("Received response from", "pshard", p.Shard(), "tHash", tHash, "root", root)
+		log.Debug("Received response from", "pshard", p.Shard(), "tHash", tHash, "root", root, "length", len(vals))
 
 		go pm.AddFetchedData(tHash, p.Shard(), vals)
 
@@ -990,18 +990,18 @@ func (pm *ProtocolManager) AddFetchedData(tHash common.Hash, pshard uint64, vals
 	tcb, tok := pm.pendingCrossTxs[tHash]
 	if !tok {
 		log.Warn("Transacion control block not found", "thash", tHash)
+		pm.crossTxsMu.RUnlock()
+		return
 	}
 	pm.crossTxsMu.RUnlock()
 
 	tcb.TxControlMu.RLock()
 	if !tcb.ShardStatus[pshard] {
 		tcb.TxControlMu.RUnlock()
-		tcb.AddData(pshard, vals)
+		status := tcb.AddData(pshard, vals)
 
-		tcb.TxControlMu.RLock()
-		status := tcb.Status
-		tcb.TxControlMu.RUnlock()
-		log.Info("Foreign Data added", "thash", tHash, "shard", pshard, "status", status)
+		log.Info("Foreign Data added", "thash", tHash, "shard", pshard, "status", status, "		dataLent", len(vals))
+
 		if status {
 			go pm.blockchain.PostForeignDataEvent(tHash)
 		}

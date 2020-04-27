@@ -46,7 +46,7 @@ var emptyCodeHash = crypto.Keccak256Hash(nil)
 
 type (
 	// CanTransferFunc is the signature of a transfer guard function
-	CanTransferFunc func(*types.TxControl, uint64, StateDB, common.Address, *big.Int) bool
+	CanTransferFunc func(*types.TxControl, map[common.Address]*types.CLock, map[common.Address]*types.CLock, uint64, StateDB, common.Address, *big.Int) bool
 	// TransferFunc is the signature of a transfer function
 	TransferFunc func(uint64, *types.TxControl, map[common.Address]*types.CData, StateDB, common.Address, common.Address, *big.Int)
 	// GetHashFunc returns the nth block hash in the blockchain
@@ -126,7 +126,11 @@ type EVM struct {
 	Context
 	// DC stores foreign data
 	tcb        *types.TxControl
-	tcbChanges map[common.Address]*types.CData
+	tcbChanges map[common.Address]*types.CData // tcbChanges stores the temporary modification done by the
+
+	gLockedAddr   map[common.Address]*types.CLock // globally locked keys
+	cUnlockedAddr map[common.Address]*types.CLock // locally unlocked keys
+
 	// StateDB gives access to the underlying state
 	StateDB StateDB
 	// Depth is the current call stack
@@ -164,16 +168,18 @@ type EVM struct {
 
 // NewEVM returns a new EVM. The returned EVM is not thread safe and should
 // only ever be used *once*.
-func NewEVM(ctx Context, tcb *types.TxControl, statedb, privateState StateDB, chainConfig *params.ChainConfig, vmConfig Config) *EVM {
+func NewEVM(ctx Context, tcb *types.TxControl, gLockedAddr, cUnlockedAddr map[common.Address]*types.CLock, statedb, privateState StateDB, chainConfig *params.ChainConfig, vmConfig Config) *EVM {
 	evm := &EVM{
-		Context:      ctx,
-		tcb:          tcb,
-		tcbChanges:   make(map[common.Address]*types.CData),
-		StateDB:      statedb,
-		vmConfig:     vmConfig,
-		chainConfig:  chainConfig,
-		chainRules:   chainConfig.Rules(ctx.BlockNumber),
-		interpreters: make([]Interpreter, 0, 1),
+		Context:       ctx,
+		tcb:           tcb,
+		gLockedAddr:   gLockedAddr,   // global locked keys
+		cUnlockedAddr: cUnlockedAddr, // keys unlocked so far due to transaction execution
+		tcbChanges:    make(map[common.Address]*types.CData),
+		StateDB:       statedb,
+		vmConfig:      vmConfig,
+		chainConfig:   chainConfig,
+		chainRules:    chainConfig.Rules(ctx.BlockNumber),
+		interpreters:  make([]Interpreter, 0, 1),
 
 		publicState:  statedb,
 		privateState: privateState,
@@ -238,7 +244,7 @@ func (evm *EVM) Call(caller ContractRef, addr common.Address, input []byte, gas 
 		return nil, gas, ErrDepth
 	}
 	// Fail if we're trying to transfer more than the available balance
-	if !evm.Context.CanTransfer(evm.tcb, evm.Context.Shard, evm.StateDB, caller.Address(), value) {
+	if !evm.Context.CanTransfer(evm.tcb, evm.gLockedAddr, evm.cUnlockedAddr, evm.Context.Shard, evm.StateDB, caller.Address(), value) {
 		return nil, gas, ErrInsufficientBalance
 	}
 
@@ -353,7 +359,7 @@ func (evm *EVM) CallCode(caller ContractRef, addr common.Address, input []byte, 
 		return nil, gas, ErrDepth
 	}
 	// Fail if we're trying to transfer more than the available balance
-	if !evm.CanTransfer(evm.tcb, evm.Context.Shard, evm.StateDB, caller.Address(), value) {
+	if !evm.CanTransfer(evm.tcb, evm.gLockedAddr, evm.cUnlockedAddr, evm.Context.Shard, evm.StateDB, caller.Address(), value) {
 		return nil, gas, ErrInsufficientBalance
 	}
 
@@ -471,7 +477,7 @@ func (evm *EVM) create(caller ContractRef, codeAndHash *codeAndHash, gas uint64,
 	if evm.depth > int(params.CallCreateDepth) {
 		return nil, common.Address{}, gas, ErrDepth
 	}
-	if !evm.CanTransfer(evm.tcb, evm.Context.Shard, evm.StateDB, caller.Address(), value) {
+	if !evm.CanTransfer(evm.tcb, evm.gLockedAddr, evm.cUnlockedAddr, evm.Context.Shard, evm.StateDB, caller.Address(), value) {
 		return nil, common.Address{}, gas, ErrInsufficientBalance
 	}
 
@@ -639,6 +645,25 @@ func getBalance(env *EVM, addr common.Address) (*big.Int, error) {
 			return new(big.Int).SetUint64(balance), nil
 		}
 	}
+
+	// @sourav, todo: update this with appropriate state modifications!
+	// We do not allow modification to the address, if the
+	// address is locked at all.
+	/**
+	if gLock, gaok := env.gLockedAddr[addr]; gaok {
+		if _, uaok := env.cUnlockedAddr[addr]; !uaok {
+			log.Info("@ds, addresslocked found during balance check!", "addr", addr)
+			return nil, ErrAddressLocked
+		}
+		uLock := env.cUnlockedAddr[addr]
+		for gKey := range gLock.Keys {
+			if _, kok := uLock.Keys[gKey]; !kok {
+				return nil, ErrAddressLocked
+			}
+		}
+	}
+	*/
+
 	state := getDualState(env, addr)
 	balance := state.GetBalance(addr).Uint64()
 	if env.Context.Shard > uint64(0) {
@@ -671,7 +696,12 @@ func setState(env *EVM, addr common.Address, loc, val common.Hash) error {
 			log.Debug("@ds updating state in cache ", "addr", addr, "loc", loc, "val", val)
 			return nil
 		}
+	} else {
+		if env.checkLockedStatus(addr, loc) {
+			return ErrAddressLocked
+		}
 	}
+
 	if env.Context.Shard > uint64(0) {
 		log.Debug("@ds updating state in state", "dc", env.tcb, "addr", addr, "loc", loc, "val", val)
 	}
@@ -703,6 +733,10 @@ func getStateAt(env *EVM, addr common.Address, loc common.Hash) (common.Hash, er
 			log.Debug("@ds returning state from cache", "addr", addr, "loc", loc, "val", val)
 			return val, nil
 		}
+	} else {
+		if env.checkLockedStatus(addr, loc) {
+			return common.Hash{}, ErrAddressLocked
+		}
 	}
 	state := getDualState(env, addr)
 	val := state.GetState(addr, loc)
@@ -710,6 +744,28 @@ func getStateAt(env *EVM, addr common.Address, loc common.Hash) (common.Hash, er
 		log.Debug("@ds returning state from state", "dc", env.tcb, "addr", addr, "loc", loc, "val", val)
 	}
 	return val, nil
+}
+
+// check whether the particular key is already locked due to a cross-shard transaction.
+// If locked return true, otherwise return false.
+func (evm *EVM) checkLockedStatus(addr common.Address, loc common.Hash) bool {
+	// Only enter this if the address is gloabally locked!
+	if gKeys, gaok := evm.gLockedAddr[addr]; gaok {
+		if _, kok := gKeys.Keys[loc]; kok {
+			// globaly locked but locally not unlocked
+			if _, cuaok := evm.cUnlockedAddr[addr]; !cuaok {
+				log.Info("@ds Address locked by a cross-shard tx 1", "addr", addr, "loc", loc)
+				return true
+			}
+			// globally locked, checking for local unlock
+			uKeys := evm.cUnlockedAddr[addr]
+			if _, ulok := uKeys.Keys[loc]; !ulok {
+				log.Info("@ds Address locked by a cross-shard tx 2", "addr", addr, "loc", loc)
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func getDualState(env *EVM, addr common.Address) StateDB {
