@@ -520,7 +520,7 @@ func testDAOChallenge(t *testing.T, localForked, remoteForked bool, timeout bool
 	if err != nil {
 		t.Fatalf("failed to create new blockchain: %v", err)
 	}
-	pm, err := NewProtocolManager(config, downloader.FullSync, DefaultConfig.NumShard, DefaultConfig.ShardId, DefaultConfig.NetworkId, evmux, new(testTxPool), pow, blockchain, db, false)
+	pm, err := NewProtocolManager(config, downloader.FullSync, DefaultConfig.NumShard, DefaultConfig.TxBatch, DefaultConfig.ShardId, DefaultConfig.NetworkId, evmux, new(testTxPool), pow, blockchain, db, false)
 	if err != nil {
 		t.Fatalf("failed to start test protocol manager: %v", err)
 	}

@@ -33,12 +33,13 @@ import (
 )
 
 // New creates an Istanbul consensus core
-func New(backend istanbul.Backend, config *istanbul.Config, myShard, numShard uint64) Engine {
+func New(backend istanbul.Backend, config *istanbul.Config, myShard, numShard uint64, txBatch bool) Engine {
 	r := metrics.NewRegistry()
 	c := &core{
 		config:             config,
 		myShard:            myShard,
 		numShard:           numShard,
+		txBatch:            txBatch,
 		valSetAll:          make(map[uint64][]common.Address),
 		address:            backend.Address(),
 		state:              StateAcceptRequest,
@@ -69,6 +70,7 @@ type core struct {
 	config   *istanbul.Config
 	myShard  uint64
 	numShard uint64
+	txBatch  bool
 	address  common.Address
 	state    State
 	logger   log.Logger
@@ -107,8 +109,6 @@ type core struct {
 
 func (c *core) SetAllValidators(validators []common.Address) {
 	totalValidators := uint64(len(validators))
-	// numShard := int(c.numShard)
-	// myShard := int(c.myShard)
 	validatorsPerShard := totalValidators / c.numShard
 
 	for i := uint64(0); i < c.numShard; i++ {

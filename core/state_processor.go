@@ -97,9 +97,7 @@ func (p *StateProcessor) Process(block *types.Block, statedb, privateState *stat
 			tcb = nil
 		}
 
-		// s1 := statedb.Copy()
 		receipt, privateReceipt, _, err := ApplyTransaction(p.config, p.bc, nil, gp, tcb, p.bc.lockedAddr, nil, statedb, privateState, header, tx, usedGas, cfg)
-		// s2 := statedb.Copy()
 
 		// Unlocking keys
 		if txType == types.CrossShardLocal {
@@ -215,19 +213,9 @@ func (p *StateProcessor) Process(block *types.Block, statedb, privateState *stat
 			privateReceipts = append(privateReceipts, privateReceipt)
 			allLogs = append(allLogs, privateReceipt.Logs...)
 		}
-
-		// if header.Shard > uint64(0) {
-		// 	log.Info("@ds Process Tx ", "s1", s1.IntermediateRoot(false), "s2", s2.IntermediateRoot(false))
-		// }
-
 	}
 	// Finalize the block, applying any consensus engine specific extras (e.g. block rewards)
-	// s3 := statedb.Copy()
 	p.engine.Finalize(p.bc, header, statedb, block.Transactions(), block.Uncles(), receipts)
-	// s4 := statedb.Copy()
-	// if header.Shard > uint64(0) {
-	// 	log.Info("@ds Process before finalize", "s3", s3.IntermediateRoot(false), "s4", s4.IntermediateRoot(false))
-	// }
 	p.bc.AddCount(ccount)
 	return receipts, privateReceipts, allLogs, *usedGas, nil
 }
@@ -266,23 +254,15 @@ func ApplyTransaction(config *params.ChainConfig, bc *BlockChain, author *common
 		return nil, nil, 0, err
 	}
 
-	// s1 := statedb.Copy()
 	// Update the state with pending changes
 	var root []byte
 	if config.IsByzantium(header.Number) {
-		// if header.Shard > uint64(0) {
-		// 	log.Info("config.IsByzantium")
-		// }
 		statedb.Finalise(true)
 	} else {
 		root = statedb.IntermediateRoot(config.IsEIP158(header.Number)).Bytes()
 	}
 	*usedGas += gas
-	// s2 := statedb.Copy()
 
-	// if header.Shard > uint64(0) {
-	// 	log.Info("@ds Apply transaction", "s1", s1.IntermediateRoot(false), "s2", s2.IntermediateRoot(false))
-	// }
 	// If this is a private transaction, the public receipt should always
 	// indicate success.
 	publicFailed := !(config.IsQuorum && tx.IsPrivate()) && failed

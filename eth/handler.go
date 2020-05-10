@@ -1191,6 +1191,7 @@ func (pm *ProtocolManager) BroadcastBlock(block *types.Block, propagate bool) {
 					txs     []*types.Transaction
 				)
 				funcSig, _ := hex.DecodeString("61e86776") // addDecision(uint256,uint256,bytes32,bool,bytes32)
+				// funcSig eeceb073: addAck(uint256,uint256,bytes32)
 				shardByte := make([]byte, 32)
 				binary.BigEndian.PutUint64(shardByte[24:], pm.myshard)
 				data := make([]byte, dataLen)

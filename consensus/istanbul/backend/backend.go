@@ -42,7 +42,7 @@ const (
 )
 
 // New creates an Ethereum backend for Istanbul core engine.
-func New(config *istanbul.Config, privateKey *ecdsa.PrivateKey, myshard, numShard uint64, db, refdb ethdb.Database) consensus.Istanbul {
+func New(config *istanbul.Config, privateKey *ecdsa.PrivateKey, myshard, numShard uint64, txBatch bool, db, refdb ethdb.Database) consensus.Istanbul {
 	// Allocate the snapshot caches and create the engine
 	recents, _ := lru.NewARC(inmemorySnapshots)
 	recentMessages, _ := lru.NewARC(inmemoryPeers)
@@ -51,6 +51,7 @@ func New(config *istanbul.Config, privateKey *ecdsa.PrivateKey, myshard, numShar
 		config:           config,
 		myshard:          myshard,
 		numShard:         numShard,
+		txBatch:          txBatch,
 		istanbulEventMux: new(event.TypeMux),
 		privateKey:       privateKey,
 		address:          crypto.PubkeyToAddress(privateKey.PublicKey),
@@ -63,7 +64,7 @@ func New(config *istanbul.Config, privateKey *ecdsa.PrivateKey, myshard, numShar
 		recentMessages:   recentMessages,
 		knownMessages:    knownMessages,
 	}
-	backend.core = istanbulCore.New(backend, backend.config, myshard, numShard)
+	backend.core = istanbulCore.New(backend, backend.config, myshard, numShard, txBatch)
 	return backend
 }
 
@@ -73,6 +74,7 @@ type backend struct {
 	config           *istanbul.Config
 	myshard          uint64
 	numShard         uint64
+	txBatch          bool
 	istanbulEventMux *event.TypeMux
 	privateKey       *ecdsa.PrivateKey
 	address          common.Address
@@ -117,6 +119,11 @@ func (sb *backend) Address() common.Address {
 // NumShard returns the total number of shard
 func (sb *backend) NumShard() uint64 {
 	return sb.numShard
+}
+
+// TxBatch returns the batching status
+func (sb *backend) TxBatch() bool {
+	return sb.txBatch
 }
 
 // MyShard returns local shard id

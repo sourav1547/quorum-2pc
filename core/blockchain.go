@@ -116,6 +116,7 @@ func (exr *ExecResult) Reset(refNum uint64) {
 type BlockChain struct {
 	myshard     uint64
 	numShard    uint64
+	txBatch     bool
 	ref         bool                // To indicate a reference chain
 	chainConfig *params.ChainConfig // Chain & network configuration
 	cacheConfig *CacheConfig        // Cache configuration for pruning
@@ -183,7 +184,7 @@ type BlockChain struct {
 // NewBlockChain returns a fully initialised block chain using information
 // available in the database. It initialises the default Ethereum Validator and
 // Processor.
-func NewBlockChain(db ethdb.Database, cacheConfig *CacheConfig, chainConfig *params.ChainConfig, engine consensus.Engine, vmConfig vm.Config, shouldPreserve func(block *types.Block) bool, ref bool, shard, numShard uint64, pendingCrossTxs map[common.Hash]*types.TxControl, crossTxMu sync.RWMutex, refCrossTxs map[uint64][]common.Hash, refCrossMu sync.RWMutex, promCrossTxs map[common.Hash]bool, promCrossMu sync.RWMutex, lockedAddr map[common.Address]*types.CLock, lockedAddrMu sync.RWMutex, thLocked map[common.Hash]bool, thLockedMu sync.RWMutex) (*BlockChain, error) {
+func NewBlockChain(db ethdb.Database, cacheConfig *CacheConfig, chainConfig *params.ChainConfig, engine consensus.Engine, vmConfig vm.Config, shouldPreserve func(block *types.Block) bool, ref bool, shard, numShard uint64, txBatch bool, pendingCrossTxs map[common.Hash]*types.TxControl, crossTxMu sync.RWMutex, refCrossTxs map[uint64][]common.Hash, refCrossMu sync.RWMutex, promCrossTxs map[common.Hash]bool, promCrossMu sync.RWMutex, lockedAddr map[common.Address]*types.CLock, lockedAddrMu sync.RWMutex, thLocked map[common.Hash]bool, thLockedMu sync.RWMutex) (*BlockChain, error) {
 	if cacheConfig == nil {
 		cacheConfig = &CacheConfig{
 			TrieNodeLimit: 256,
@@ -200,6 +201,7 @@ func NewBlockChain(db ethdb.Database, cacheConfig *CacheConfig, chainConfig *par
 	bc := &BlockChain{
 		myshard:           shard,
 		numShard:          numShard,
+		txBatch:           txBatch,
 		crossCount:        uint64(0),
 		ref:               ref,
 		chainConfig:       chainConfig,
@@ -272,6 +274,11 @@ func (bc *BlockChain) MyShard() uint64 {
 // NumShard returns number of shard in the system
 func (bc *BlockChain) NumShard() uint64 {
 	return bc.numShard
+}
+
+// TxBatch returns batching status
+func (bc *BlockChain) TxBatch() bool {
+	return bc.txBatch
 }
 
 func (bc *BlockChain) getProcInterrupt() bool {

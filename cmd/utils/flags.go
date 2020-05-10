@@ -141,6 +141,11 @@ var (
 		Usage: "Total number of shard except the reference shard, (default=1 shard and 1 reference shard)",
 		Value: eth.DefaultConfig.NumShard,
 	}
+	TxBatchFlag = cli.Uint64Flag{
+		Name:  "txbatch",
+		Usage: "To indicate whether batching should be enabled or not (0=No batching, 1=Batching)",
+		Value: eth.DefaultConfig.TxBatch,
+	}
 	NetworkIdFlag = cli.Uint64Flag{
 		Name:  "networkid",
 		Usage: "Network identifier (integer, 1=Frontier, 2=Morden (disused), 3=Ropsten, 4=Rinkeby, 5=Ottoman)",
@@ -1230,6 +1235,9 @@ func SetEthConfig(ctx *cli.Context, stack *node.Node, cfg *eth.Config) {
 	if ctx.GlobalIsSet(NumShardFlag.Name) {
 		cfg.NumShard = ctx.GlobalUint64(NumShardFlag.Name)
 	}
+	if ctx.GlobalIsSet(TxBatchFlag.Name) {
+		cfg.TxBatch = ctx.GlobalUint64(TxBatchFlag.Name)
+	}
 	if ctx.GlobalIsSet(NetworkIdFlag.Name) {
 		cfg.NetworkId = ctx.GlobalUint64(NetworkIdFlag.Name)
 	}
@@ -1528,7 +1536,7 @@ func MakeChain(ctx *cli.Context, stack *node.Node) (chain *core.BlockChain, chai
 		addrLock sync.RWMutex
 		thLock   sync.RWMutex
 	)
-	chain, err = core.NewBlockChain(chainDb, cache, config, engine, vmcfg, nil, false, uint64(0), uint64(1), nil, clock, nil, promLock, nil, refLock, nil, addrLock, nil, thLock)
+	chain, err = core.NewBlockChain(chainDb, cache, config, engine, vmcfg, nil, false, uint64(0), uint64(1), false, nil, clock, nil, promLock, nil, refLock, nil, addrLock, nil, thLock)
 	if err != nil {
 		Fatalf("Can't create BlockChain: %v", err)
 	}

@@ -125,6 +125,7 @@ var (
 		utils.VMEnableDebugFlag,
 		utils.MyShardFlag,
 		utils.NumShardFlag,
+		utils.TxBatchFlag,
 		utils.NetworkIdFlag,
 		utils.RPCCORSDomainFlag,
 		utils.RPCVirtualHostsFlag,

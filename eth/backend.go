@@ -114,6 +114,7 @@ type Ethereum struct {
 	networkID     uint64
 	myShard       uint64
 	numShard      uint64
+	txBatch       bool
 	netRPCService *ethapi.PublicNetAPI
 
 	lock sync.RWMutex // Protects the variadic fields (e.g. gas price and etherbase)
@@ -188,7 +189,7 @@ func New(ctx *node.ServiceContext, config *Config) (*Ethereum, error) {
 		eventMux:        ctx.EventMux,
 		rEventMux:       ctx.REventMux,
 		accountManager:  ctx.AccountManager,
-		engine:          CreateConsensusEngine(ctx, chainConfig, config, config.MyShard, config.NumShard, config.MinerNotify, config.MinerNoverify, chainDb, refDb),
+		engine:          CreateConsensusEngine(ctx, chainConfig, config, config.MyShard, config.NumShard, config.TxBatch, config.MinerNotify, config.MinerNoverify, chainDb, refDb),
 		shutdownChan:    make(chan bool),
 		numShard:        config.NumShard,
 		myShard:         config.MyShard,
@@ -221,6 +222,7 @@ func New(ctx *node.ServiceContext, config *Config) (*Ethereum, error) {
 		eth.shardAddMap[i] = addr
 		log.Info("Address created for ", "shard", i, "address", common.BigToAddress(addr))
 	}
+	eth.txBatch = config.TxBatch == uint64(1) // TxBatch==1 indicates batching is enabled
 
 	// force to set the istanbul etherbase to node key address
 	if chainConfig.Istanbul != nil {
@@ -244,8 +246,8 @@ func New(ctx *node.ServiceContext, config *Config) (*Ethereum, error) {
 		}
 		cacheConfig = &core.CacheConfig{Disabled: config.NoPruning, TrieNodeLimit: config.TrieCache, TrieTimeLimit: config.TrieTimeout}
 	)
-	eth.blockchain, err = core.NewBlockChain(chainDb, cacheConfig, eth.chainConfig, eth.engine, vmConfig, eth.shouldPreserve, false, config.MyShard, config.NumShard, eth.pendingCrossTxs, eth.crossTxsMu, eth.refCrossTxs, eth.refCrossMu, eth.promCrossTxs, eth.promCrossMu, eth.lockedAddr, eth.lockedAddrMu, eth.thLocked, eth.thLockedMu)
-	eth.refchain, rerr = core.NewBlockChain(refDb, cacheConfig, eth.chainConfig, eth.engine, vmConfig, eth.shouldPreserve, true, config.MyShard, config.NumShard, eth.pendingCrossTxs, eth.crossTxsMu, eth.refCrossTxs, eth.refCrossMu, eth.promCrossTxs, eth.promCrossMu, eth.lockedAddr, eth.lockedAddrMu, eth.thLocked, eth.thLockedMu)
+	eth.blockchain, err = core.NewBlockChain(chainDb, cacheConfig, eth.chainConfig, eth.engine, vmConfig, eth.shouldPreserve, false, config.MyShard, config.NumShard, eth.txBatch, eth.pendingCrossTxs, eth.crossTxsMu, eth.refCrossTxs, eth.refCrossMu, eth.promCrossTxs, eth.promCrossMu, eth.lockedAddr, eth.lockedAddrMu, eth.thLocked, eth.thLockedMu)
+	eth.refchain, rerr = core.NewBlockChain(refDb, cacheConfig, eth.chainConfig, eth.engine, vmConfig, eth.shouldPreserve, true, config.MyShard, config.NumShard, eth.txBatch, eth.pendingCrossTxs, eth.crossTxsMu, eth.refCrossTxs, eth.refCrossMu, eth.promCrossTxs, eth.promCrossMu, eth.lockedAddr, eth.lockedAddrMu, eth.thLocked, eth.thLockedMu)
 	if err != nil {
 		return nil, err
 	}
@@ -311,7 +313,7 @@ func CreateDB(ctx *node.ServiceContext, config *Config, name string) (ethdb.Data
 }
 
 // CreateConsensusEngine creates the required type of consensus engine instance for an Ethereum service
-func CreateConsensusEngine(ctx *node.ServiceContext, chainConfig *params.ChainConfig, config *Config, myShard, numShard uint64, notify []string, noverify bool, db, refdb ethdb.Database) consensus.Engine {
+func CreateConsensusEngine(ctx *node.ServiceContext, chainConfig *params.ChainConfig, config *Config, myShard, numShard, _txBatch uint64, notify []string, noverify bool, db, refdb ethdb.Database) consensus.Engine {
 	// If proof-of-authority is requested, set it up
 	if chainConfig.Clique != nil {
 		return clique.New(chainConfig.Clique, db)
@@ -324,7 +326,8 @@ func CreateConsensusEngine(ctx *node.ServiceContext, chainConfig *params.ChainCo
 		config.Istanbul.ProposerPolicy = istanbul.ProposerPolicy(chainConfig.Istanbul.ProposerPolicy)
 		config.Istanbul.Ceil2Nby3Block = chainConfig.Istanbul.Ceil2Nby3Block
 
-		return istanbulBackend.New(&config.Istanbul, ctx.NodeKey(), myShard, numShard, db, refdb)
+		txBatch := _txBatch == uint64(1)
+		return istanbulBackend.New(&config.Istanbul, ctx.NodeKey(), myShard, numShard, txBatch, db, refdb)
 	}
 
 	// Otherwise assume proof-of-work

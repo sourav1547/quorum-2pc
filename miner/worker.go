@@ -1033,23 +1033,22 @@ func (w *worker) checkLockedStatus(addr common.Address, addrKeys []common.Hash) 
 				}
 			}
 			return false
-		} else {
-			w.lockedAddrMu.RLock()
-			lockedCLock := w.lockedAddr[addr]
-			w.lockedAddrMu.RUnlock()
-
-			lockedCLock.ClockMu.RLock()
-			defer lockedCLock.ClockMu.RUnlock()
-			lockedKeys := lockedCLock.Keys
-
-			for _, key := range addrKeys {
-				// globally locked
-				if _, lkok := lockedKeys[key]; lkok {
-					return true
-				}
-			}
-			return false
 		}
+		w.lockedAddrMu.RLock()
+		lockedCLock := w.lockedAddr[addr]
+		w.lockedAddrMu.RUnlock()
+
+		lockedCLock.ClockMu.RLock()
+		defer lockedCLock.ClockMu.RUnlock()
+		lockedKeys := lockedCLock.Keys
+
+		for _, key := range addrKeys {
+			// globally locked
+			if _, lkok := lockedKeys[key]; lkok {
+				return true
+			}
+		}
+		return false
 	}
 
 	// locked locally but not globally
