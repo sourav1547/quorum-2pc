@@ -986,72 +986,102 @@ func (pm *ProtocolManager) Enqueue(id string, block *types.Block) {
 
 // AddFetchedData fills the data cache with data downloaded from peer
 func (pm *ProtocolManager) AddFetchedData(tHash common.Hash, pshard uint64, vals []*types.KeyVal) {
-	pm.crossTxsMu.RLock()
-	tcb, tok := pm.pendingCrossTxs[tHash]
-	if !tok {
+	ftcb, ftok := pm.pendingCrossTxs[tHash]
+	if !ftok {
 		log.Warn("Transacion control block not found", "thash", tHash)
-		pm.crossTxsMu.RUnlock()
 		return
 	}
-	pm.crossTxsMu.RUnlock()
-
-	tcb.TxControlMu.RLock()
-	if !tcb.ShardStatus[pshard] {
-		tcb.TxControlMu.RUnlock()
-		status := tcb.AddData(pshard, vals)
-
-		log.Info("Foreign Data added", "thash", tHash, "shard", pshard, "status", status, "		dataLent", len(vals))
-
-		if status {
-			go pm.blockchain.PostForeignDataEvent(tHash)
+	// Creating a map out of received Data
+	mkvals := make(map[common.Address]*types.MKeyVal)
+	for _, keyval := range vals {
+		mkv := types.NewMKeyVal(keyval.Addr, keyval.Balance, keyval.Nonce)
+		for i, key := range keyval.Keys {
+			data := keyval.Data[i]
+			mkv.Data[key] = data
 		}
-	} else {
-		tcb.TxControlMu.RUnlock()
+		mkvals[keyval.Addr] = mkv
+	}
+	// Add data for transactions
+	hashes := []common.Hash{tHash}
+	if pm.blockchain.TxBatch() {
+		hashes = pm.refchain.RefCrossTxs(ftcb.RefNum)
+	}
+	// Add data to all transactions!
+	promote := true
+	for _, hash := range hashes {
+		tcb, tok := pm.pendingCrossTxs[hash]
+		if tok {
+			if !tcb.AddData(pshard, mkvals) {
+				promote = false
+			}
+		} else {
+			return
+		}
+	}
+	// If data recieved for all trasnactions then promote!
+	if promote {
+		go pm.blockchain.PostForeignDataEvent(hashes)
 	}
 }
 
 // FetchData requests data from appropriate shard
 func (pm *ProtocolManager) FetchData(tHash common.Hash) {
-	pm.crossTxsMu.RLock()
-	tcb, tok := pm.pendingCrossTxs[tHash]
-	if !tok {
+	ftcb, ftok := pm.pendingCrossTxs[tHash]
+	if !ftok {
 		log.Warn("Transaction Control block not found", "hash", tHash)
 	}
-	pm.crossTxsMu.RUnlock()
 
-	tcb.TxControlMu.RLock()
-	status := tcb.Status
-	shardStatus := tcb.ShardStatus
-	tcb.TxControlMu.RUnlock()
-	if !status {
-		for shard := range shardStatus {
-			if shard != pm.myshard {
-				tcb.TxControlMu.RLock()
-				root := tcb.Commits.Commits[shard].StateRoot
-				tcb.TxControlMu.RUnlock()
-				go pm.FetchDataShard(tHash, shard, root)
+	hashes := []common.Hash{tHash}
+	if pm.blockchain.TxBatch() {
+		hashes = pm.refchain.RefCrossTxs(ftcb.RefNum)
+	}
+	// Downloading keys!
+	dKeys := make(map[uint64]map[common.Address]map[common.Hash]bool)
+	for _, hash := range hashes {
+		if tcb, tok := pm.pendingCrossTxs[hash]; tok {
+			for addr, cKeys := range tcb.Keyval {
+				shard := tcb.AddrToShard[addr]
+				if shard == pm.myshard {
+					continue
+				}
+				if _, sok := dKeys[shard]; !sok {
+					dKeys[shard] = make(map[common.Address]map[common.Hash]bool)
+				}
+				if _, aok := dKeys[shard][addr]; !aok {
+					dKeys[shard][addr] = make(map[common.Hash]bool)
+				}
+				for _, key := range cKeys.Keys {
+					if _, kok := dKeys[shard][addr][key]; !kok {
+						dKeys[shard][addr][key] = false
+					}
+				}
 			}
 		}
+	}
+	// Dowloading data from each shard!
+	for shard := range dKeys {
+		var root common.Hash
+		if pm.refchain.TxBatch() {
+			root = pm.refchain.Commit(ftcb.RefNum, shard)
+		} else {
+			root = ftcb.Commits.Commits[shard].StateRoot
+		}
+		go pm.FetchDataShard(tHash, dKeys[shard], shard, root)
 	}
 }
 
 // FetchDataShard sends request for each data
-func (pm *ProtocolManager) FetchDataShard(tHash common.Hash, shard uint64, root common.Hash) {
-	pm.crossTxsMu.RLock()
-	tcb := pm.pendingCrossTxs[tHash]
-	pm.crossTxsMu.RUnlock()
-	var (
-		keys  []*types.CKeys
-		count uint64
-	)
-	tcb.TxControlMu.RLock()
-	for addr, lshard := range tcb.AddrToShard {
-		if lshard == shard {
-			keys = append(keys, tcb.Keyval[addr])
-			count++
+func (pm *ProtocolManager) FetchDataShard(tHash common.Hash, sKeys map[common.Address]map[common.Hash]bool, shard uint64, root common.Hash) {
+	var keys []*types.CKeys
+	count := 0
+	for addr, cKeys := range sKeys {
+		newck := &types.CKeys{Addr: addr}
+		for key := range cKeys {
+			newck.Keys = append(newck.Keys, key)
 		}
+		keys = append(keys, newck)
+		count++
 	}
-	tcb.TxControlMu.RUnlock()
 
 	pm.cousinPeerLock.RLock()
 	peers := pm.cousinPeers[shard].PeersWithoutRequest(tHash)
@@ -1068,7 +1098,7 @@ func (pm *ProtocolManager) FetchDataShard(tHash common.Hash, shard uint64, root 
 	}
 	requests := peers[:uint64(requestLen)]
 	for _, peer := range requests {
-		peer.SendDataRequest(tHash, count, root, keys)
+		peer.SendDataRequest(tHash, uint64(count), root, keys)
 	}
 	return
 }
@@ -1183,33 +1213,64 @@ func (pm *ProtocolManager) BroadcastBlock(block *types.Block, propagate bool) {
 				log.Debug("Propagated block3", "hash", hash, "recipients", len(transfer), "duration", common.PrettyDuration(time.Since(block.ReceivedAt)))
 
 				var (
-					txType  uint64
 					start   = 0
+					u24     = 24
+					u32     = 32
 					txData  []byte
-					dataLen = 4 + 5*32
-					croot   common.Hash
 					txs     []*types.Transaction
+					dataLen int
+					croot   = block.Root()
 				)
-				funcSig, _ := hex.DecodeString("61e86776") // addDecision(uint256,uint256,bytes32,bool,bytes32)
-				// funcSig eeceb073: addAck(uint256,uint256,bytes32)
+				// indicates whether we have already submitted an ack for the block or not
+				acks := make(map[uint64]bool)
+				decSig, _ := hex.DecodeString("8043a805") // 8043a805: addDecision(uint256,uint256,uint256,bytes32,bytes32)
+				ackSig, _ := hex.DecodeString("01b70096") // 01b70096: addAck(uint256,uint256,uint256,bytes32)
 				shardByte := make([]byte, 32)
 				binary.BigEndian.PutUint64(shardByte[24:], pm.myshard)
-				data := make([]byte, dataLen)
-				start += copy(data[start:], funcSig)
-				start += copy(data[start:], shardByte)
-				croot = block.Root()
-
 				for _, tx := range block.Transactions() {
-					txType = tx.TxType()
+					txType := tx.TxType()
+					txData = tx.Data()
 					if txType == types.LocalDecision {
-						txData = tx.Data()
-						start += copy(data[start:], txData[4:])
-						copy(data[start:], croot.Bytes())
-						dTx := types.NewTransaction(types.TxnStatus, tx.Nonce(), pm.myshard, pm.refAddress, big.NewInt(0), pm.stateGasLimit, pm.stateGasPrice, data)
+						dataLen = 4 + 5*u32
+						data := make([]byte, dataLen)
+						start += copy(data[start:], decSig)    // function sig
+						start += copy(data[start:], shardByte) // shard
+						index := 4 + u32
+						start += copy(data[start:], txData[index:index+3*u32]) // tid, tHash, bNum
+						start += copy(data[start:], croot.Bytes())             // root
+						nonce := pm.blockchain.AtomicNonce()
+						dTx := types.NewTransaction(types.TxnStatus, nonce, pm.myshard, pm.refAddress, big.NewInt(0), pm.stateGasLimit, pm.stateGasPrice, data)
 						txs = append(txs, dTx)
+
+					} else if txType == types.CrossShardLocal {
+						tHash := tx.Hash()
+						tcb := pm.pendingCrossTxs[tHash]
+						// If batching and already acknowledged!
+						if pm.blockchain.TxBatch() && acks[tcb.RefNum] {
+							continue
+						}
+						acks[tcb.RefNum] = true
+						// Preparing data
+						dataLen = 4 + 4*u32
+						data := make([]byte, dataLen)
+						bNumByte := make([]byte, u32)
+						txidByte := make([]byte, 32)
+						binary.BigEndian.PutUint64(txidByte[24:], tcb.TxID)
+						binary.BigEndian.PutUint64(bNumByte[u24:], tcb.RefNum)
+						// Copying data!
+						start += copy(data[start:], ackSig)    // function sig
+						start += copy(data[start:], shardByte) // shard id
+						start += copy(data[start:], txidByte)  // txID
+						start += copy(data[start:], tHash.Bytes())
+						start += copy(data[start:], bNumByte) // reference number
+						nonce := pm.blockchain.AtomicNonce()
+						// Creating the acknowledgement transaction and appending it to the
+						// list
+						aTx := types.NewTransaction(types.Acknowledgement, nonce, pm.myshard, pm.refAddress, big.NewInt(0), pm.stateGasLimit, pm.stateGasPrice, data)
+						txs = append(txs, aTx)
 					}
 				}
-				go pm.BroadcastDtxs(txs)
+				go pm.BroadcastRtxs(txs)
 			}
 		}
 		return
@@ -1302,8 +1363,8 @@ func (pm *ProtocolManager) BroadcastTxs(txs types.Transactions) {
 	}
 }
 
-// BroadcastDtxs broadcasts decision transation to reference shard members
-func (pm *ProtocolManager) BroadcastDtxs(txs types.Transactions) {
+// BroadcastRtxs broadcasts decision transation to reference shard members
+func (pm *ProtocolManager) BroadcastRtxs(txs types.Transactions) {
 	var txset = make(map[*peer]types.Transactions)
 
 	// Broadcast transactions to a batch of peers not knowing about it
@@ -1324,7 +1385,7 @@ func (pm *ProtocolManager) BroadcastDtxs(txs types.Transactions) {
 		for _, peer := range peers {
 			txset[peer] = append(txset[peer], tx)
 		}
-		log.Debug("Broadcast decision transaction", "hash", tx.Hash(), "recipients", len(peers))
+		log.Info("Queing decision/ack transaction", "hash", tx.Hash(), "type", tx.TxType(), "nonce", tx.Nonce(), "recipients", len(peers))
 	}
 	// FIXME include this again: peers = peers[:int(math.Sqrt(float64(len(peers))))]
 	for peer, txs := range txset {

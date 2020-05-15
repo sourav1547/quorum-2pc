@@ -417,7 +417,7 @@ func opBalance(pc *uint64, interpreter *EVMInterpreter, contract *Contract, memo
 	// balance := getDualState(interpreter.evm, addr).GetBalance(addr)
 	balance, err := getBalance(interpreter.evm, addr)
 	if err != nil {
-		log.Info("@ds Error in opBalance", "err", err)
+		log.Warn("Error in opBalance", "err", err)
 		return nil, err
 	}
 	slot.Set(balance)
@@ -644,7 +644,7 @@ func opSload(pc *uint64, interpreter *EVMInterpreter, contract *Contract, memory
 	// val := getDualState(interpreter.evm, contract.Address()).GetState(contract.Address(), common.BigToHash(loc))
 	val, err := getStateAt(interpreter.evm, contract.Address(), common.BigToHash(loc))
 	if err != nil {
-		log.Info("@ds Error in opsload", "err", err)
+		log.Warn("Error in opsload", "err", err)
 		return nil, err
 	}
 	loc.SetBytes(val.Bytes())
@@ -658,7 +658,7 @@ func opSstore(pc *uint64, interpreter *EVMInterpreter, contract *Contract, memor
 	// getDualState(interpreter.evm, contract.Address()).SetState(contract.Address(), loc, common.BigToHash(val))
 	err := setState(interpreter.evm, contract.Address(), loc, common.BigToHash(val))
 	if err != nil {
-		log.Info("@ds Error in opsstore", "err", err)
+		log.Warn("Error in opsstore", "err", err)
 		return nil, err
 	}
 	interpreter.intPool.put(val)

@@ -71,12 +71,10 @@ func (cg *callHelper) MakeCall(private bool, key *ecdsa.PrivateKey, to common.Ad
 	// TODO(joel): can we just pass nil instead of bc?
 	var (
 		txLock   sync.RWMutex
-		refLock  sync.RWMutex
 		addrLock sync.RWMutex
 		promLock sync.RWMutex
-		thLock   sync.RWMutex
 	)
-	bc, _ := NewBlockChain(cg.db, nil, params.QuorumTestChainConfig, ethash.NewFaker(), vm.Config{}, nil, false, uint64(0), uint64(1), false, nil, txLock, nil, refLock, nil, promLock, nil, addrLock, nil, thLock)
+	bc, _ := NewBlockChain(cg.db, nil, params.QuorumTestChainConfig, ethash.NewFaker(), vm.Config{}, nil, false, uint64(0), uint64(1), false, nil, txLock, nil, promLock, nil, addrLock, nil, nil)
 	context := NewEVMContext(msg, &cg.header, bc, &from)
 	vmenv := vm.NewEVM(context, nil, nil, nil, publicState, privateState, params.QuorumTestChainConfig, vm.Config{})
 	sender := vm.AccountRef(msg.From())

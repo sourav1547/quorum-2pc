@@ -75,10 +75,6 @@ func run(evm *EVM, contract *Contract, input []byte, readOnly bool) ([]byte, err
 				}(evm.interpreter)
 				evm.interpreter = interpreter
 			}
-			// if evm.Context.Shard > uint64(0) {
-			// 	log.Info("@ds before interpreter run", "root", evm.StateDB.IntermediateRoot(false),
-			// 		"shard", evm.Context.Shard)
-			// }
 			return interpreter.Run(contract, input, readOnly)
 		}
 	}
@@ -251,16 +247,7 @@ func (evm *EVM) Call(caller ContractRef, addr common.Address, input []byte, gas 
 	var (
 		to       = AccountRef(addr)
 		snapshot = evm.StateDB.Snapshot()
-		// s1       *state.StateDB
-		// s2       *state.StateDB
-		// s3       *state.StateDB
-		// s4       *state.StateDB
-		// s5       *state.StateDB
 	)
-
-	// if evm.Context.Shard > uint64(0) {
-	// 	log.Info("@ds before checking address", "root", evm.StateDB.IntermediateRoot(false))
-	// }
 
 	if !evm.StateDB.Exist(addr) {
 		precompiles := PrecompiledContractsHomestead
@@ -277,10 +264,6 @@ func (evm *EVM) Call(caller ContractRef, addr common.Address, input []byte, gas 
 		}
 		evm.StateDB.CreateAccount(addr)
 	}
-	// if evm.Context.Shard > uint64(0) {
-	// 	s1 = evm.StateDB.Copy()
-	// 	// log.Info("@ds before transfer", "root", evm.StateDB.IntermediateRoot(false))
-	// }
 	if evm.ChainConfig().IsQuorum {
 		// skip transfer if value /= 0 (see note: Quorum, States, and Value Transfer)
 		if value.Sign() != 0 {
@@ -293,10 +276,6 @@ func (evm *EVM) Call(caller ContractRef, addr common.Address, input []byte, gas 
 		evm.Transfer(evm.Context.Shard, evm.tcb, evm.tcbChanges, evm.StateDB, caller.Address(), to.Address(), value)
 	}
 
-	// if evm.Context.Shard > uint64(0) {
-	// 	s2 = evm.StateDB.Copy()
-	// 	// 	log.Info("@ds after transfer", "root", evm.StateDB.IntermediateRoot(false))
-	// }
 	// Initialise a new contract and set the code that is to be used by the EVM.
 	// The contract is a scoped environment for this execution context only.
 	contract := NewContract(caller, to, value, gas)
@@ -313,15 +292,7 @@ func (evm *EVM) Call(caller ContractRef, addr common.Address, input []byte, gas 
 			evm.vmConfig.Tracer.CaptureEnd(ret, gas-contract.Gas, time.Since(start), err)
 		}()
 	}
-	// if evm.Context.Shard > uint64(0) {
-	// 	s3 = evm.StateDB.Copy()
-	// 	// 	log.Info("@ds before run", "root", evm.StateDB.IntermediateRoot(false))
-	// }
 	ret, err = run(evm, contract, input, false)
-	// if evm.Context.Shard > uint64(0) {
-	// 	s4 = evm.StateDB.Copy()
-	// 	// 	log.Info("@ds after run", "root", evm.StateDB.IntermediateRoot(false), "err", err)
-	// }
 
 	// When an error was returned by the EVM or when setting the creation code
 	// above we revert to the snapshot and consume any gas remaining. Additionally
@@ -332,10 +303,6 @@ func (evm *EVM) Call(caller ContractRef, addr common.Address, input []byte, gas 
 			contract.UseGas(contract.Gas)
 		}
 	}
-	// s5 = evm.StateDB.Copy()
-	// if evm.Context.Shard > uint64(0) {
-	// 	log.Info("@ds roots", "s1", s1.IntermediateRoot(false), "s2", s2.IntermediateRoot(false), "s3", s3.IntermediateRoot(false), "s4", s4.IntermediateRoot(false), "s5", s5.IntermediateRoot(false), "err", err)
-	// }
 	return ret, contract.Gas, err
 }
 
@@ -805,15 +772,11 @@ func (env *EVM) Push(statedb StateDB) {
 	env.StateDB = statedb
 }
 func (env *EVM) Pop() {
-	// start := env.StateDB.Copy()
 	env.currentStateDepth--
 	if env.quorumReadOnly && env.currentStateDepth == env.readOnlyDepth {
 		env.quorumReadOnly = false
 	}
 	env.StateDB = env.states[env.currentStateDepth-1]
-	// if env.Context.Shard > uint64(0) {
-	// 	log.Info("@ds Updated state inside Pop", "start", start.IntermediateRoot(false), "end", env.StateDB.IntermediateRoot(false))
-	// }
 }
 
 func (env *EVM) Depth() int { return env.depth }

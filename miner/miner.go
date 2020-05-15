@@ -58,13 +58,13 @@ type Miner struct {
 }
 
 // New creates a new miner
-func New(eth Backend, config *params.ChainConfig, mux *event.TypeMux, engine consensus.Engine, recommit time.Duration, gasFloor, gasCeil uint64, isLocalBlock func(block *types.Block) bool, pendingCrossTxs map[common.Hash]*types.TxControl, crossTxsMu sync.RWMutex, refCrossTxs map[uint64][]common.Hash, refCrossMu sync.RWMutex, promCrossTxs map[common.Hash]bool, promCrossMu sync.RWMutex, lockedAddr map[common.Address]*types.CLock, lockedAddrMu sync.RWMutex, thLocked map[common.Hash]bool, thLockedMu sync.RWMutex) *Miner {
+func New(eth Backend, config *params.ChainConfig, mux *event.TypeMux, engine consensus.Engine, recommit time.Duration, gasFloor, gasCeil uint64, isLocalBlock func(block *types.Block) bool, pendingCrossTxs map[common.Hash]*types.TxControl, crossTxsMu sync.RWMutex, promCrossTxs map[common.Hash]bool, promCrossMu sync.RWMutex, rwLocked map[common.Address]*types.CLock, rwLockedMu sync.RWMutex) *Miner {
 	miner := &Miner{
 		eth:      eth,
 		mux:      mux,
 		engine:   engine,
 		exitCh:   make(chan struct{}),
-		worker:   newWorker(config, engine, eth, mux, recommit, gasFloor, gasCeil, isLocalBlock, pendingCrossTxs, crossTxsMu, refCrossTxs, refCrossMu, promCrossTxs, promCrossMu, lockedAddr, lockedAddrMu, thLocked, thLockedMu),
+		worker:   newWorker(config, engine, eth, mux, recommit, gasFloor, gasCeil, isLocalBlock, pendingCrossTxs, crossTxsMu, promCrossTxs, promCrossMu, rwLocked, rwLockedMu),
 		canStart: 1,
 	}
 	go miner.update()

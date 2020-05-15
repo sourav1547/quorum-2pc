@@ -18,6 +18,8 @@ package types
 
 import (
 	"container/heap"
+	"encoding/binary"
+	"encoding/hex"
 	"errors"
 	"io"
 	"math/big"
@@ -43,7 +45,8 @@ const (
 	ContractInit    = uint64(3) // Initializing Contracts
 	CrossShardLocal = uint64(4) // Cross shard transaction for local execution.
 	LocalDecision   = uint64(5)
-	Others          = uint64(6)
+	Acknowledgement = uint64(6)
+	Others          = uint64(7)
 )
 
 var (
@@ -77,6 +80,7 @@ type txdata struct {
 	Price        *big.Int        `json:"gasPrice" gencodec:"required"`
 	GasLimit     uint64          `json:"gas"      gencodec:"required"`
 	Recipient    *common.Address `json:"to"       rlp:"nil"` // nil means contract creation
+	Sender       *common.Address `json:"sender" rlp:"nil"`
 	Amount       *big.Int        `json:"value"    gencodec:"required"`
 	Payload      []byte          `json:"input"    gencodec:"required"`
 
@@ -132,6 +136,38 @@ func NewContractCreation(txType, nonce uint64, shard uint64, amount *big.Int, ga
 	return newTransaction(txType, nonce, uint64(0), nil, amount, gasLimit, gasPrice, data)
 }
 
+// NewCrossTransaction creates a new cross-shard transaction
+func NewCrossTransaction(txType, nonce uint64, shard uint64, to, sender common.Address, amount *big.Int, gasLimit uint64, gasPrice *big.Int, data []byte) *Transaction {
+	return newCrossTransaction(txType, nonce, shard, &to, &sender, amount, gasLimit, gasPrice, data)
+}
+
+func newCrossTransaction(txType, nonce uint64, shard uint64, to, sender *common.Address, amount *big.Int, gasLimit uint64, gasPrice *big.Int, data []byte) *Transaction {
+	if len(data) > 0 {
+		data = common.CopyBytes(data)
+	}
+	d := txdata{
+		TxType:       txType,
+		AccountNonce: nonce,
+		Shard:        shard,
+		Recipient:    to,
+		Sender:       sender,
+		Payload:      data,
+		Amount:       new(big.Int),
+		GasLimit:     gasLimit,
+		Price:        new(big.Int),
+		V:            new(big.Int),
+		R:            new(big.Int),
+		S:            new(big.Int),
+	}
+	if amount != nil {
+		d.Amount.Set(amount)
+	}
+	if gasPrice != nil {
+		d.Price.Set(gasPrice)
+	}
+	return &Transaction{data: d}
+}
+
 func newTransaction(txType, nonce uint64, shard uint64, to *common.Address, amount *big.Int, gasLimit uint64, gasPrice *big.Int, data []byte) *Transaction {
 	if len(data) > 0 {
 		data = common.CopyBytes(data)
@@ -162,6 +198,11 @@ func newTransaction(txType, nonce uint64, shard uint64, to *common.Address, amou
 // SetRecipient updates the recipient of a transaction
 func (tx *Transaction) SetRecipient(to *common.Address) {
 	tx.data.Recipient = to
+}
+
+// SetSender updates the sender of a transaction
+func (tx *Transaction) SetSender(sender *common.Address) {
+	tx.data.Sender = sender
 }
 
 // ChainId returns which chain id this transaction was signed for (if at all)
@@ -253,7 +294,11 @@ func (tx *Transaction) To() *common.Address {
 	return &to
 }
 
+// From returns the address of the sender!
 func (tx *Transaction) From() common.Address {
+	if tx.TxType() == CrossShardLocal {
+		return *tx.data.Sender
+	}
 	signer := deriveSigner(tx.data.V)
 	if from, err := Sender(signer, tx); err == nil {
 		return from
@@ -519,10 +564,12 @@ func (t *TransactionsByPriceAndNonce) Pop() {
 
 // CKeys implement keys involved in a cross-shard transaction
 type CKeys struct {
-	Addr common.Address
-	Keys []common.Hash
+	Addr  common.Address
+	Keys  []common.Hash
+	WKeys []common.Hash
 }
 
+// AddKey adds a key to the CKey
 func (ck *CKeys) AddKey(key common.Hash) {
 	ck.Keys = append(ck.Keys, key)
 }
@@ -532,7 +579,26 @@ type KeyVal struct {
 	Addr    common.Address
 	Balance uint64
 	Nonce   uint64
+	Keys    []common.Hash
 	Data    []common.Hash
+}
+
+// MKeyVal stores the data in a map format!
+type MKeyVal struct {
+	Addr    common.Address
+	Balance uint64
+	Nonce   uint64
+	Data    map[common.Hash]common.Hash // key::value
+}
+
+// NewMKeyVal creates an new value!
+func NewMKeyVal(addr common.Address, bal uint64, nonce uint64) *MKeyVal {
+	return &MKeyVal{
+		Addr:    addr,
+		Balance: bal,
+		Nonce:   nonce,
+		Data:    make(map[common.Hash]common.Hash),
+	}
 }
 
 type CData struct {
@@ -546,7 +612,7 @@ type CData struct {
 type TCommit struct {
 	TxHash    common.Hash
 	Shard     uint64
-	Status    bool
+	BNum      uint64
 	StateRoot common.Hash
 }
 
@@ -585,25 +651,182 @@ type CrossTx struct {
 	Shards       []uint64
 	BlockNum     *big.Int
 	Tx           *Transaction
-	AllContracts map[uint64][]CKeys
+	AllContracts map[uint64][]*CKeys
 }
 
 func (ctx *CrossTx) SetTransaction(tx *Transaction) {
 	ctx.Tx = &Transaction{data: tx.TxData()}
 }
 
+// GetRWSet to get read-write set per shard of a cross-shard trasnaction
+func GetRWSet(numContracts uint16, index uint16, data []byte) ([]*CKeys, uint16) {
+	var (
+		allKeys []*CKeys
+		u20     = uint16(20)
+		u32     = uint16(32)
+		addr    common.Address
+		numKeys uint16
+	)
+	for i := uint16(0); i < numContracts; i++ {
+		// Extracting keys per contarct
+		addr = common.BytesToAddress(data[index : index+u20])
+		index += u20
+		numKeys = binary.BigEndian.Uint16(data[index : index+2])
+		index += 2
+		cKeys := &CKeys{Addr: addr, Keys: []common.Hash{}}
+		for k := uint16(0); k < numKeys; k++ {
+			key := common.BytesToHash(data[index : index+u32])
+			index += u32
+			cKeys.Keys = append(cKeys.Keys, key)
+			// Checking whether the key is written to or not, if so
+			// add to writekeys
+			isWrite := int(data[index]) == 1
+			if isWrite {
+				cKeys.WKeys = append(cKeys.WKeys, key)
+			}
+			index++
+		}
+		// Adding all keys to a list
+		allKeys = append(allKeys, cKeys)
+	}
+	return allKeys, index
+}
+
+// GetAllRWSet return all read-write set used in a cross-shard transaction
+func GetAllRWSet(numShard uint16, data []byte) (map[uint64][]*CKeys, []uint64, uint16) {
+	var (
+		index        = uint16(0)
+		numContracts uint16
+		allKeys      []*CKeys // list of addr:keys for a given shard
+		shards       []uint64
+		allContracts = make(map[uint64][]*CKeys) // map shard: {list of addr:keys}
+	)
+
+	for i := uint16(0); i < numShard; i++ {
+		shard := binary.BigEndian.Uint16(data[index : index+2])
+		shards = append(shards, uint64(shard))
+		index += 2
+		numContracts = binary.BigEndian.Uint16(data[index : index+2])
+		index += 2
+		if numContracts > 0 {
+			allKeys, index = GetRWSet(numContracts, index, data)
+		}
+		allContracts[uint64(shard)] = allKeys
+	}
+	return allContracts, shards, index
+}
+
+func ParseCrossTxData(numShard uint16, data []byte) *CrossTx {
+	var (
+		index    uint16
+		addrSize = uint16(20)
+		u8       = uint16(8)
+		u32      = uint16(32)
+	)
+	ctx := &CrossTx{
+		Shards:       []uint64{},
+		AllContracts: make(map[uint64][]*CKeys),
+	}
+	ctx.AllContracts, ctx.Shards, index = GetAllRWSet(numShard, data)
+
+	sender := common.BytesToAddress(data[index : index+addrSize])
+	index += addrSize
+	nonce := binary.BigEndian.Uint64(data[index : index+u8])
+	index += u8
+	value := new(big.Int)
+	value.SetBytes(data[index : index+u32])
+	index += u32
+	receiver := common.BytesToAddress(data[index : index+addrSize])
+	index += addrSize
+	gasLimit := binary.BigEndian.Uint64(data[index : index+u8])
+	index += u8
+	gasPrice := binary.BigEndian.Uint64(data[index : index+u8])
+	index += u8
+
+	tx := NewCrossTransaction(CrossShardLocal, uint64(nonce), uint64(0), receiver, sender, value, gasLimit, big.NewInt(int64(gasPrice)), data[index:])
+	ctx.SetTransaction(tx)
+
+	log.Debug("New Cross shard Transaction", "hash", ctx.Tx.Hash(), "from", ctx.Tx.From(), "to", ctx.Tx.To(), "nonce", ctx.Tx.Nonce(), "value", ctx.Tx.Value(), "params", hex.EncodeToString(data[index:]))
+	return ctx
+}
+
+// DecodeCrossTx extracts shards
+func DecodeCrossTx(myshard uint64, data []byte) (uint64, []uint64, bool) {
+	elemSize := uint64(32)
+	lenData := data[2*elemSize+elemSize-8 : 3*elemSize]
+	length := binary.BigEndian.Uint64(lenData)
+	index := 3 * elemSize
+	var (
+		involved = false
+		shards   []uint64
+		u24      = uint64(24)
+		u32      = uint64(32)
+	)
+	for i := uint64(0); i < length; i++ {
+		shardData := data[index+u24 : index+u32]
+		index += u32
+		shard := binary.BigEndian.Uint64(shardData)
+		if shard == myshard {
+			involved = true
+		}
+		shards = append(shards, shard)
+	}
+	return index, shards, involved
+}
+
+// DecodeAck decodes an acknowledgement
+func DecodeAck(stx *Transaction) (uint64, uint64, uint64, common.Hash) {
+	var (
+		u32   = 32
+		u24   = 24
+		index = 0
+	)
+	data := stx.Data()[4:]
+	shard := binary.BigEndian.Uint64(data[index+u24 : index+u32])
+	index += u32
+	tid := binary.BigEndian.Uint64(data[index+u24 : index+u32])
+	index += u32
+	block := binary.BigEndian.Uint64(data[index+u24 : index+u32])
+	index += u32
+	tHash := common.BytesToHash(data[index:])
+	return shard, tid, block, tHash
+}
+
+// DecodeDecision decodes elements of a local decision
+func DecodeDecision(local bool, tx *Transaction) (uint64, uint64, common.Hash, uint64, common.Hash) {
+	var (
+		u32   = 32
+		u24   = 24
+		index = 0
+	)
+	data := tx.Data()[4:]
+	shard := binary.BigEndian.Uint64(data[index+u24 : index+u32])
+	index += u32
+	txID := binary.BigEndian.Uint64(data[index+u24 : index+u32])
+	index += u32
+	tHash := common.BytesToHash(data[index : index+u32])
+	index += u32
+	bNum := binary.BigEndian.Uint64(data[index+u24 : index+u32])
+	root := common.Hash{}
+	if !local {
+		index += u32
+		root = common.BytesToHash(data[index : index+u32])
+	}
+	return shard, txID, tHash, bNum, root
+}
+
 // CLock stores currently locked keys of a contract
 type CLock struct {
 	Addr    common.Address
 	ClockMu sync.RWMutex
-	Keys    map[common.Hash]bool
+	Keys    map[common.Hash]int
 }
 
 // NewCLock returns a new lock object
 func NewCLock(addr common.Address) *CLock {
 	return &CLock{
 		Addr: addr,
-		Keys: make(map[common.Hash]bool),
+		Keys: make(map[common.Hash]int),
 	}
 }
 
@@ -641,29 +864,30 @@ func NewTxControl(rNum uint64, status bool) *TxControl {
 }
 
 // AddData adds data corresponding to keys
-func (tcb *TxControl) AddData(shard uint64, vals []*KeyVal) bool {
+func (tcb *TxControl) AddData(shard uint64, mkvals map[common.Address]*MKeyVal) bool {
 	tcb.TxControlMu.Lock()
 	defer tcb.TxControlMu.Unlock()
-	if !tcb.ShardStatus[shard] && len(vals) > 0 {
-		for _, values := range vals {
-			caddr := values.Addr
+	// If no address from that particular shard!
+	if _, sok := tcb.ShardStatus[shard]; !sok {
+		return true
+	}
+	if !tcb.ShardStatus[shard] && len(mkvals) > 0 {
+		for addr, keys := range tcb.Keyval {
+			if tcb.AddrToShard[addr] != shard {
+				continue
+			}
+			mkv := mkvals[addr]
 			cdata := &CData{
-				Addr:    caddr,
-				Nonce:   values.Nonce,
-				Balance: values.Balance,
+				Addr:    addr,
+				Nonce:   mkv.Nonce,
+				Balance: mkv.Balance,
 				Data:    make(map[common.Hash]common.Hash),
 			}
-
-			data := values.Data
-			lenData := len(data)
-			keys := tcb.Keyval[caddr].Keys
-			for i := 0; i < lenData; i++ {
-				key := keys[i]
-				val := data[i]
-				cdata.Data[key] = val
+			for _, key := range keys.Keys {
+				cdata.Data[key] = mkv.Data[key]
 			}
-			tcb.Values[caddr] = cdata
-			log.Debug("@ds adding data for", "addr", tcb.Values[caddr].Addr, "bal", tcb.Values[caddr].Nonce)
+			tcb.Values[addr] = cdata
+			log.Debug("Adding data for", "addr", cdata.Addr, "nonce", cdata.Nonce)
 		}
 		tcb.ShardStatus[shard] = true
 		tcb.Received++
@@ -686,8 +910,12 @@ func (tcb *TxControl) InitTxControl(myshard, txID uint64, ctx *CrossTx) {
 
 	for shard, allKeys := range ctx.AllContracts {
 		if _, ok := tcb.ShardStatus[shard]; !ok {
-			tcb.Required++
-			tcb.ShardStatus[shard] = false
+			if shard != myshard {
+				tcb.Required++
+				tcb.ShardStatus[shard] = false
+			} else {
+				tcb.ShardStatus[shard] = true
+			}
 		}
 		for _, contract := range allKeys {
 			caddr := contract.Addr
@@ -698,6 +926,10 @@ func (tcb *TxControl) InitTxControl(myshard, txID uint64, ctx *CrossTx) {
 			for _, key := range contract.Keys {
 				tcb.Keyval[caddr].AddKey(key)
 			}
+			for _, key := range contract.WKeys {
+				tcb.Keyval[caddr].AddKey(key)
+			}
+			log.Debug("Adding keys", "addr", caddr, "shard", shard)
 		}
 	}
 }

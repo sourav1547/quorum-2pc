@@ -90,15 +90,18 @@ func GetHashFn(ref *types.Header, chain ChainContext) func(n uint64) common.Hash
 func CanTransfer(tcb *types.TxControl, gLockedAddr, cUnlockedAddr map[common.Address]*types.CLock, bshard uint64, db vm.StateDB, addr common.Address, amount *big.Int) bool {
 	var balance *big.Int
 	if tcb != nil {
-		shard := tcb.AddrToShard[addr]
-		if shard != bshard {
-			balance = new(big.Int).SetUint64(tcb.Values[addr].Balance)
-		} else {
-			balance = db.GetBalance(addr)
+		tcb.TxControlMu.RLock()
+		defer tcb.TxControlMu.RUnlock()
+		if shard, sok := tcb.AddrToShard[addr]; sok {
+			if shard != bshard {
+				balance = new(big.Int).SetUint64(tcb.Values[addr].Balance)
+			} else {
+				balance = db.GetBalance(addr)
+			}
+			return balance.Cmp(amount) >= 0
 		}
-		return balance.Cmp(amount) >= 0
+		return false
 	}
-
 	// @sourav, todo: decide whether to put these checks or
 	// not. We can decide to ignore this check if needed!
 	// We will have to anyway check during data access.
@@ -127,15 +130,26 @@ func CanTransfer(tcb *types.TxControl, gLockedAddr, cUnlockedAddr map[common.Add
 // Transfer subtracts amount from sender and adds amount to recipient using the given Db
 func Transfer(bshard uint64, tcb *types.TxControl, tcbChanges map[common.Address]*types.CData, db vm.StateDB, sender, recipient common.Address, amount *big.Int) {
 	if tcb != nil {
+		tcb.TxControlMu.RLock()
+		tcb.TxControlMu.RUnlock()
 		sshard := tcb.AddrToShard[sender]
 		if sshard != bshard {
 			if _, ok := tcbChanges[sender]; !ok {
 				vals := tcb.Values[sender]
-				tcbChanges[sender] = &types.CData{
-					Addr:    sender,
-					Balance: vals.Balance,
-					Nonce:   vals.Nonce,
-					Data:    make(map[common.Hash]common.Hash),
+				if vals != nil {
+					tcbChanges[sender] = &types.CData{
+						Addr:    sender,
+						Balance: vals.Balance,
+						Nonce:   vals.Nonce,
+						Data:    make(map[common.Hash]common.Hash),
+					}
+				} else {
+					tcbChanges[recipient] = &types.CData{
+						Addr:    recipient,
+						Balance: db.GetBalance(recipient).Uint64(),
+						Nonce:   db.GetNonce(recipient),
+						Data:    make(map[common.Hash]common.Hash),
+					}
 				}
 			}
 			tcbChanges[sender].Balance = tcbChanges[sender].Balance - amount.Uint64()
@@ -147,11 +161,20 @@ func Transfer(bshard uint64, tcb *types.TxControl, tcbChanges map[common.Address
 		if rshard != bshard {
 			if _, ok := tcbChanges[recipient]; !ok {
 				vals := tcb.Values[recipient]
-				tcbChanges[recipient] = &types.CData{
-					Addr:    recipient,
-					Balance: vals.Balance,
-					Nonce:   vals.Nonce,
-					Data:    make(map[common.Hash]common.Hash),
+				if vals != nil {
+					tcbChanges[recipient] = &types.CData{
+						Addr:    recipient,
+						Balance: vals.Balance,
+						Nonce:   vals.Nonce,
+						Data:    make(map[common.Hash]common.Hash),
+					}
+				} else {
+					tcbChanges[recipient] = &types.CData{
+						Addr:    recipient,
+						Balance: db.GetBalance(recipient).Uint64(),
+						Nonce:   db.GetNonce(recipient),
+						Data:    make(map[common.Hash]common.Hash),
+					}
 				}
 			}
 			tcbChanges[recipient].Balance = tcbChanges[recipient].Balance + amount.Uint64()

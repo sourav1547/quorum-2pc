@@ -185,8 +185,7 @@ func (st *StateTransition) buyGas() error {
 
 func (st *StateTransition) preCheck() error {
 	// Make sure this transaction's nonce is correct.
-	txType := st.msg.TxType()
-	if txType == types.ContractInit || txType == types.CrossShardLocal || txType == types.LocalDecision || txType == types.TxnStatus {
+	if st.msg.TxType() != types.Others {
 		return st.buyGas()
 	}
 	if st.msg.CheckNonce() {
@@ -308,14 +307,7 @@ func (st *StateTransition) TransitionDb() (ret []byte, usedGas uint64, failed bo
 			st.state.AddBalance(st.evm.Coinbase, new(big.Int).Mul(new(big.Int).SetUint64(st.gasUsed()), st.gasPrice))
 			return nil, 0, false, nil
 		}
-
-		// s1 := evm.StateDB.Copy()
 		ret, leftoverGas, vmerr = evm.Call(sender, to, data, st.gas, st.value)
-		// s2 := evm.StateDB.Copy()
-		// if evm.Context.Shard > uint64(0) {
-		// 	log.Debug("@ds TransitionDb", "s1", s1.IntermediateRoot(false), "s2",
-		// 		s2.IntermediateRoot(false))
-		// }
 	}
 	if vmerr != nil {
 		// The only possible consensus-error would be if there wasn't

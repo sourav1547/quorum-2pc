@@ -17,8 +17,6 @@
 package core
 
 import (
-	"encoding/binary"
-
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/consensus"
 	"github.com/ethereum/go-ethereum/consensus/misc"
@@ -68,11 +66,6 @@ func (p *StateProcessor) Process(block *types.Block, statedb, privateState *stat
 
 		privateReceipts types.Receipts
 		txType          uint64
-		ccount          = uint64(0)
-		elemSize        = 32
-		u64Offset       = 24
-		croot           = block.Root()
-		myshard         = p.bc.MyShard()
 		tHash           common.Hash
 	)
 	// Mutate the block and state according to any hard-fork specs
@@ -97,113 +90,27 @@ func (p *StateProcessor) Process(block *types.Block, statedb, privateState *stat
 			tcb = nil
 		}
 
-		receipt, privateReceipt, _, err := ApplyTransaction(p.config, p.bc, nil, gp, tcb, p.bc.lockedAddr, nil, statedb, privateState, header, tx, usedGas, cfg)
-
-		// Unlocking keys
-		if txType == types.CrossShardLocal {
-			tcb.TxControlMu.RLock()
-			keyval := tcb.Keyval
-			addrToShard := tcb.AddrToShard
-			tcb.TxControlMu.RUnlock()
-
-			for addr, keys := range keyval {
-				if shard := addrToShard[addr]; shard == myshard {
-					p.bc.lockedAddrMu.RLock()
-					aclok := p.bc.lockedAddr[addr]
-					p.bc.lockedAddrMu.RUnlock()
-
-					aclok.ClockMu.Lock()
-					for _, key := range keys.Keys {
-						delete(aclok.Keys, key)
-					}
-					clockSize := len(aclok.Keys)
-					aclok.ClockMu.Unlock()
-					if clockSize == 0 {
-						p.bc.lockedAddrMu.Lock()
-						delete(p.bc.lockedAddr, addr)
-						p.bc.lockedAddrMu.Unlock()
-					}
-				}
-			}
-			p.bc.promCrossMu.Lock()
-			delete(p.bc.promCrossTxs, tHash)
-			p.bc.promCrossMu.Unlock()
-
-			log.Info("Executed cross-shard transaction", "thash", tHash, "bn", block.NumberU64())
-
-		} else if txType == types.LocalDecision {
-			index := 4
-			data := tx.Data()
-			index += elemSize
-			tHash := common.BytesToHash(data[index : index+elemSize])
-			index += elemSize
-			status := binary.BigEndian.Uint64(data[index+u64Offset : index+elemSize])
-			decision := status == uint64(1)
-
-			log.Info("@cs Local Decision for", "th", tHash, "status", decision, "bn", block.NumberU64(), "sTh", tx.Hash())
-			if decision {
-				p.bc.crossTxsMu.RLock()
-				tcb, tok := p.bc.pendingCrossTxs[tHash]
-				if !tok {
-					p.bc.crossTxsMu.RUnlock()
-					continue
-				}
-				p.bc.crossTxsMu.RUnlock()
-
-				commit := &types.TCommit{TxHash: tHash, Shard: myshard, Status: decision, StateRoot: croot}
-				tcb.AddTCommit(commit)
-				tcb.UpdateLocalStatus(myshard)
-
-				tcb.TxControlMu.RLock()
-				keyVal := tcb.Keyval
-				addrToShard := tcb.AddrToShard
-				tcb.TxControlMu.RUnlock()
-
-				for addr, ckeys := range keyVal {
-					if shard := addrToShard[addr]; shard == myshard {
-						p.bc.lockedAddrMu.Lock()
-						if _, ok := p.bc.lockedAddr[addr]; !ok {
-							p.bc.lockedAddr[addr] = types.NewCLock(addr)
-						}
-						alock := p.bc.lockedAddr[addr]
-						p.bc.lockedAddrMu.Unlock()
-
-						alock.ClockMu.Lock()
-						for _, key := range ckeys.Keys {
-							alock.Keys[key] = false
-						}
-						alock.ClockMu.Unlock()
-					}
-				}
-
-				// Keeping a marker that the transaction locked additional values
-				p.bc.thLockedMu.Lock()
-				if _, thok := p.bc.thLocked[tHash]; !thok {
-					p.bc.thLocked[tHash] = true
-				}
-				p.bc.thLockedMu.Unlock()
-			}
-			/**
-			else {
-				p.bc.crossTxsMu.Lock()
-				if _, tok := p.bc.pendingCrossTxs[tHash]; tok {
-					delete(p.bc.pendingCrossTxs, tHash)
-				}
-				p.bc.crossTxsMu.Unlock()
-			}
-			*/
-			ccount++
-		}
+		receipt, privateReceipt, _, err := ApplyTransaction(p.config, p.bc, nil, gp, tcb, p.bc.rwLocked, nil, statedb, privateState, header, tx, usedGas, cfg)
 
 		if tx.TxType() == types.CrossShardLocal && err != nil {
 			statedb.RevertToSnapshot(snap)
 			privateState.RevertToSnapshot(psnap)
-			log.Warn("Skipping transaction", "thash", tx.Hash(), "from", tx.From(), "error", err)
-			continue
+			log.Warn("Error in CrossShardLocal transaction", "thash", tx.Hash(), "from", tx.From(), "error", err)
+
+			// Creating a dummy receipt
+			root := statedb.IntermediateRoot(false)
+			receipt = types.NewReceipt(root.Bytes(), true, *usedGas)
+			receipt.TxHash = tx.Hash()
+			receipt.GasUsed = tx.Gas()
+			// Set the receipt logs and create a bloom for filtering
+			receipt.Logs = statedb.GetLogs(tx.Hash())
+			receipt.Bloom = types.CreateBloom(types.Receipts{receipt})
+		} else {
+			if err != nil {
+				return nil, nil, nil, 0, err
+			}
 		}
-		if err != nil {
-			return nil, nil, nil, 0, err
-		}
+
 		receipts = append(receipts, receipt)
 		allLogs = append(allLogs, receipt.Logs...)
 
@@ -216,7 +123,6 @@ func (p *StateProcessor) Process(block *types.Block, statedb, privateState *stat
 	}
 	// Finalize the block, applying any consensus engine specific extras (e.g. block rewards)
 	p.engine.Finalize(p.bc, header, statedb, block.Transactions(), block.Uncles(), receipts)
-	p.bc.AddCount(ccount)
 	return receipts, privateReceipts, allLogs, *usedGas, nil
 }
 

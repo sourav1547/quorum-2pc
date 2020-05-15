@@ -19,7 +19,6 @@ package core
 
 import (
 	"encoding/binary"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -121,18 +120,22 @@ type BlockChain struct {
 	chainConfig *params.ChainConfig // Chain & network configuration
 	cacheConfig *CacheConfig        // Cache configuration for pruning
 
-	crossCount      uint64
+	crossCount      int
+	nonce           uint64
 	commitAddress   common.Address                   // Address of state commitment transaction
 	pendingCrossTxs map[common.Hash]*types.TxControl // Pending Cross shard transactions
 	crossTxsMu      sync.RWMutex
 	refCrossTxs     map[uint64][]common.Hash
-	refCrossMu      sync.RWMutex
 	promCrossTxs    map[common.Hash]bool
 	promCrossMu     sync.RWMutex
-	lockedAddr      map[common.Address]*types.CLock
-	lockedAddrMu    sync.RWMutex
-	thLocked        map[common.Hash]bool
-	thLockedMu      sync.RWMutex
+
+	procCtxs   map[common.Hash]bool                      // Map of already processed transaction
+	shardThMap map[uint64]map[uint64][]common.Hash       // ref-number: shard::tHash map
+	thKeys     map[common.Hash]map[uint64][]*types.CKeys // address locked by a transaction
+	rwLocked   map[common.Address]*types.CLock
+	rwLockedMu sync.RWMutex
+
+	shardCommits map[uint64]map[uint64]common.Hash // commits of all shards involved in cross shard transaction
 
 	foreignDataCh chan struct{}
 
@@ -184,7 +187,7 @@ type BlockChain struct {
 // NewBlockChain returns a fully initialised block chain using information
 // available in the database. It initialises the default Ethereum Validator and
 // Processor.
-func NewBlockChain(db ethdb.Database, cacheConfig *CacheConfig, chainConfig *params.ChainConfig, engine consensus.Engine, vmConfig vm.Config, shouldPreserve func(block *types.Block) bool, ref bool, shard, numShard uint64, txBatch bool, pendingCrossTxs map[common.Hash]*types.TxControl, crossTxMu sync.RWMutex, refCrossTxs map[uint64][]common.Hash, refCrossMu sync.RWMutex, promCrossTxs map[common.Hash]bool, promCrossMu sync.RWMutex, lockedAddr map[common.Address]*types.CLock, lockedAddrMu sync.RWMutex, thLocked map[common.Hash]bool, thLockedMu sync.RWMutex) (*BlockChain, error) {
+func NewBlockChain(db ethdb.Database, cacheConfig *CacheConfig, chainConfig *params.ChainConfig, engine consensus.Engine, vmConfig vm.Config, shouldPreserve func(block *types.Block) bool, ref bool, shard, numShard uint64, txBatch bool, pendingCrossTxs map[common.Hash]*types.TxControl, crossTxMu sync.RWMutex, promCrossTxs map[common.Hash]bool, promCrossMu sync.RWMutex, rwLocked map[common.Address]*types.CLock, rwLockedMu sync.RWMutex, refCrossTxs map[uint64][]common.Hash, shardThMap map[uint64]map[uint64][]common.Hash) (*BlockChain, error) {
 	if cacheConfig == nil {
 		cacheConfig = &CacheConfig{
 			TrieNodeLimit: 256,
@@ -202,7 +205,8 @@ func NewBlockChain(db ethdb.Database, cacheConfig *CacheConfig, chainConfig *par
 		myshard:           shard,
 		numShard:          numShard,
 		txBatch:           txBatch,
-		crossCount:        uint64(0),
+		crossCount:        0,
+		nonce:             0,
 		ref:               ref,
 		chainConfig:       chainConfig,
 		cacheConfig:       cacheConfig,
@@ -223,13 +227,14 @@ func NewBlockChain(db ethdb.Database, cacheConfig *CacheConfig, chainConfig *par
 		pendingCrossTxs:   pendingCrossTxs,
 		crossTxsMu:        crossTxMu,
 		refCrossTxs:       refCrossTxs,
-		refCrossMu:        refCrossMu,
 		promCrossTxs:      promCrossTxs,
 		promCrossMu:       promCrossMu,
-		lockedAddr:        lockedAddr,
-		lockedAddrMu:      lockedAddrMu,
-		thLocked:          thLocked,
-		thLockedMu:        thLockedMu,
+		procCtxs:          make(map[common.Hash]bool),
+		shardThMap:        shardThMap,
+		shardCommits:      make(map[uint64]map[uint64]common.Hash),
+		thKeys:            make(map[common.Hash]map[uint64][]*types.CKeys),
+		rwLocked:          rwLocked,
+		rwLockedMu:        rwLockedMu,
 		foreignDataCh:     make(chan struct{}),
 	}
 	bc.SetValidator(NewBlockValidator(chainConfig, bc, engine))
@@ -292,18 +297,58 @@ func (bc *BlockChain) CommitAddress() common.Address {
 
 // CrossCount counts the total number of cross-shard transaction the shard was
 // involved in
-func (bc *BlockChain) CrossCount() uint64 {
+func (bc *BlockChain) CrossCount() int {
 	return bc.crossCount
 }
 
 // AddCount increment count
-func (bc *BlockChain) AddCount(count uint64) {
+func (bc *BlockChain) AddCount(count int) {
 	bc.crossCount = bc.crossCount + count
+}
+
+// AtomicNonce returns and increment the nonce sets count
+func (bc *BlockChain) AtomicNonce() uint64 {
+	bc.nonce = bc.nonce + 1
+	return bc.nonce
 }
 
 // SetCommitAddress Sets the commit address of the chain.
 func (bc *BlockChain) SetCommitAddress(addr common.Address) {
 	bc.commitAddress = addr
+}
+
+// IsProcessed returns whether a trasnaction is already processed or not!
+func (bc *BlockChain) IsProcessed(thash common.Hash) bool {
+	bc.rwLockedMu.RLock()
+	defer bc.rwLockedMu.RUnlock()
+	_, tok := bc.procCtxs[thash]
+	return tok
+}
+
+// IsProcessedLocked returns whether a trasnaction is already processed or not!
+func (bc *BlockChain) IsProcessedLocked(thash common.Hash) bool {
+	// This function assumes the rwLockedMu is alread held
+	_, tok := bc.procCtxs[thash]
+	return tok
+}
+
+// AddProcessed a new trasnaction to the processed
+func (bc *BlockChain) AddProcessed(thash common.Hash) {
+	// This method assumes that rwLockedMu is already held
+	bc.procCtxs[thash] = false
+}
+
+// ThKeys Returns keys locked due to a transaction!
+func (bc *BlockChain) ThKeys(hash common.Hash, shard uint64) ([]*types.CKeys, bool) {
+	if keys, hok := bc.thKeys[hash]; hok {
+		return keys[shard], true
+	}
+	return []*types.CKeys{}, false
+}
+
+// ShardThMap returns cross-shard trasnac
+func (bc *BlockChain) ShardThMap(bNum, shard uint64) []common.Hash {
+	return bc.shardThMap[bNum][shard]
 }
 
 // loadLastState loads the last known chain state from the database. This method
@@ -536,9 +581,10 @@ func (bc *BlockChain) StateData(root common.Hash, keys []*types.CKeys) []*types.
 	var keyVals []*types.KeyVal
 	for _, keyList := range keys {
 		addr := keyList.Addr
-		keyVal := &types.KeyVal{Addr: addr, Nonce: pstate.GetNonce(addr), Balance: pstate.GetBalance(addr).Uint64(), Data: []common.Hash{}}
+		keyVal := &types.KeyVal{Addr: addr, Nonce: pstate.GetNonce(addr), Balance: pstate.GetBalance(addr).Uint64(), Keys: []common.Hash{}, Data: []common.Hash{}}
 		for _, key := range keyList.Keys {
 			val := pstate.GetState(addr, key)
+			keyVal.Keys = append(keyVal.Data, key)
 			keyVal.Data = append(keyVal.Data, val)
 		}
 		keyVals = append(keyVals, keyVal)
@@ -1479,6 +1525,12 @@ func (bc *BlockChain) insertChain(chain types.Blocks) (int, []interface{}, []*ty
 				promHashes = append(promHashes, hashes...)
 			}
 
+			if bc.myshard == uint64(0) {
+				bc.UpdateRefStatus(block, receipts)
+			} else {
+				bc.UpdateShardStatus(block, receipts)
+			}
+
 		case SideStatTy:
 			log.Debug("Inserted forked block", "number", block.Number(), "hash", block.Hash(), "diff", block.Difficulty(), "elapsed",
 				common.PrettyDuration(time.Since(bstart)), "txs", len(block.Transactions()), "gas", block.GasUsed(), "uncles", len(block.Uncles()))
@@ -1502,18 +1554,213 @@ func (bc *BlockChain) insertChain(chain types.Blocks) (int, []interface{}, []*ty
 	return 0, events, coalescedLogs, nil
 }
 
+func (bc *BlockChain) addNewLocks(bNum uint64, tHash common.Hash, allKeys map[uint64][]*types.CKeys) {
+	// This function assumes that the bc.rwLockedMu is already held
+	var addr common.Address
+	for shard, sKeys := range allKeys {
+		// Marking the transaction for the shard
+		if _, sok := bc.shardThMap[bNum][shard]; !sok {
+			bc.shardThMap[bNum][shard] = []common.Hash{}
+		}
+		bc.shardThMap[bNum][shard] = append(bc.shardThMap[bNum][shard], tHash)
+		// for every contract of a shard
+		for _, cKeys := range sKeys {
+			addr = cKeys.Addr
+			if _, aok := bc.rwLocked[addr]; !aok {
+				bc.rwLocked[addr] = types.NewCLock(addr)
+			}
+			// Increment counter for read locks
+			for _, key := range cKeys.Keys {
+				if _, kok := bc.rwLocked[addr].Keys[key]; !kok {
+					bc.rwLocked[addr].Keys[key] = 0
+				}
+				bc.rwLocked[addr].Keys[key] = bc.rwLocked[addr].Keys[key] + 1
+			}
+			// Mark write locks as -1
+			for _, key := range cKeys.WKeys {
+				bc.rwLocked[addr].Keys[key] = -1
+			}
+		}
+	}
+}
+
+// UpdateShardStatus handles local decision and cross-shard local
+func (bc *BlockChain) UpdateShardStatus(block *types.Block, receipts types.Receipts) {
+	bc.rwLockedMu.Lock()
+	defer bc.rwLockedMu.Unlock()
+	var (
+		ccount = 0
+		croot  = block.Root()
+	)
+	for _, tx := range block.Transactions() {
+		txType := tx.TxType()
+		if txType == types.CrossShardLocal {
+			tHash := tx.Hash()
+			tcb := bc.pendingCrossTxs[tHash]
+			keyval := tcb.Keyval
+			for addr, cKeys := range keyval {
+				if tcb.AddrToShard[addr] == bc.myshard {
+					if _, aok := bc.rwLocked[addr]; !aok {
+						bc.rwLocked[addr] = types.NewCLock(addr)
+					}
+					// Unlock the read keys
+					for _, key := range cKeys.Keys {
+						bc.rwLocked[addr].Keys[key] = bc.rwLocked[addr].Keys[key] - 1
+					}
+					// Unlock write keys
+					for _, key := range cKeys.WKeys {
+						bc.rwLocked[addr].Keys[key] = 0
+					}
+				}
+			}
+			delete(bc.promCrossTxs, tHash)
+		} else if txType == types.LocalDecision {
+			_, _, tHash, bNum, _ := types.DecodeDecision(true, tx)
+			tcb, tok := bc.pendingCrossTxs[tHash]
+			if !tok {
+				log.Warn("Transaction control block not found", "hash", tHash)
+				continue
+			}
+			// Adding self decision/commit
+			commit := &types.TCommit{TxHash: tHash, Shard: bc.myshard, BNum: bNum, StateRoot: croot}
+			if !bc.TxBatch() {
+				tcb.AddTCommit(commit)
+			}
+			hashes := []common.Hash{tHash}
+			if bc.TxBatch() {
+				hashes = bc.refCrossTxs[bNum]
+			}
+			for _, hash := range hashes {
+				tcb := bc.pendingCrossTxs[hash]
+				keyval := tcb.Keyval
+				for addr, cKeys := range keyval {
+					if tcb.AddrToShard[addr] == bc.myshard {
+						if _, aok := bc.rwLocked[addr]; !aok {
+							bc.rwLocked[addr] = types.NewCLock(addr)
+						}
+						// Updated read lock status
+						for _, key := range cKeys.Keys {
+							if _, kok := bc.rwLocked[addr].Keys[key]; !kok {
+								bc.rwLocked[addr].Keys[key] = 0
+							}
+							bc.rwLocked[addr].Keys[key] = bc.rwLocked[addr].Keys[key] + 1
+						}
+						// Updating write lock status
+						for _, key := range cKeys.WKeys {
+							bc.rwLocked[addr].Keys[key] = -1
+						}
+					}
+				}
+				ccount++
+			}
+		}
+	}
+	bc.AddCount(ccount)
+}
+
+// UpdateRefStatus updates current reference statsus
+func (bc *BlockChain) UpdateRefStatus(block *types.Block, receipts types.Receipts) {
+	bc.rwLockedMu.Lock()
+	defer bc.rwLockedMu.Unlock()
+	var (
+		elemSize  = 32
+		u64Offset = 24
+		bNum      = block.NumberU64()
+		receipt   *types.Receipt
+		rStatus   bool
+		tStatus   bool
+		txType    uint64
+		eventOut  uint64
+	)
+	for i, tx := range block.Transactions() {
+		receipt = receipts[i]
+		rStatus = receipt.Status == uint64(1)
+		txType = tx.TxType()
+
+		tStatus = false
+		if rStatus && receipt.Logs != nil {
+			if txType == types.CrossShard || txType == types.Acknowledgement {
+				eventOut = binary.BigEndian.Uint64(receipt.Logs[0].Data[u64Offset:])
+				tStatus = eventOut == uint64(1)
+			} else {
+				log.Debug("Not a relavent transaction", "status", rStatus, "txType", txType)
+			}
+		} else {
+			log.Debug("Not parsing transaction", "rs", rStatus, "txType", txType, "logs", receipt.Logs)
+		}
+
+		if tStatus {
+			if txType == types.CrossShard {
+				// Marking the trasnaction as processed
+				bc.AddProcessed(tx.Hash())
+				// Updating latest cross-shard transaction for a shard
+				data := tx.Data()[4:]
+				_, shards, _ := types.DecodeCrossTx(uint64(0), data)
+				// Updating global locks based on the new cross-shard transaction
+				numShard := len(shards)
+				index := (2+1+numShard)*elemSize + elemSize + 2
+				allKeys, _, _ := types.GetAllRWSet(uint16(numShard), data[index:])
+				if _, nok := bc.shardThMap[bNum]; !nok {
+					bc.shardThMap[bNum] = make(map[uint64][]common.Hash)
+				}
+				bc.addNewLocks(bNum, tx.Hash(), allKeys)
+			} else if txType == types.Acknowledgement {
+				// Extracting acknowledgement information
+				shard, _, bNum, tHash := types.DecodeAck(tx)
+				shardThs := []common.Hash{tHash}
+				if bc.txBatch {
+					shardThs = bc.shardThMap[bNum][shard]
+				}
+				for _, hash := range shardThs {
+					lockedAddrs, tok := bc.ThKeys(hash, shard)
+					if tok && len(lockedAddrs) > 0 {
+						for _, ckeys := range lockedAddrs {
+							bc.DeleteLocks(ckeys, hash, shard)
+						}
+					}
+				}
+			}
+		}
+	}
+}
+
+// DeleteLocks delete locks held by a shard
+func (bc *BlockChain) DeleteLocks(ckeys *types.CKeys, thash common.Hash, shard uint64) {
+	addr := ckeys.Addr
+	// Decrement the read locks
+	for _, key := range ckeys.Keys {
+		bc.rwLocked[addr].Keys[key] = bc.rwLocked[addr].Keys[key] - 1
+		if bc.rwLocked[addr].Keys[key] == 0 {
+			delete(bc.rwLocked[addr].Keys, key)
+		}
+	}
+	// Remove write locks
+	for _, key := range ckeys.WKeys {
+		delete(bc.rwLocked[addr].Keys, key)
+	}
+	// If everything is clear than delete address
+	if len(bc.rwLocked[addr].Keys) == 0 {
+		delete(bc.rwLocked, addr)
+	}
+	// Remove shard related information!
+	delete(bc.thKeys[thash], shard)
+	if len(bc.thKeys[thash]) == 0 {
+		// Remove transaction related information!
+		delete(bc.thKeys, thash)
+	}
+}
+
 // ParseBlock function extracts necessary information from a reference block
 func (bc *BlockChain) ParseBlock(block *types.Block, receipts types.Receipts) []common.Hash {
+	bc.rwLockedMu.Lock()
+	defer bc.rwLockedMu.Unlock()
 	var (
-		elemSize    = 32
-		u64Offset   = 24
+		u32         = 32
+		u24         = 24
 		myshard     = bc.MyShard()
 		refNum      = block.NumberU64()
 		eventOutput uint64
-		rStatus     bool
-		txStatus    bool
 		txID        uint64
-		txType      uint64
 		promHashes  []common.Hash
 	)
 
@@ -1524,10 +1771,10 @@ func (bc *BlockChain) ParseBlock(block *types.Block, receipts types.Receipts) []
 
 	for i, tx := range block.Transactions() {
 		// Checking execution status of the transaction
-		txType = tx.TxType()
+		txType := tx.TxType()
 		receipt := receipts[i]
-		rStatus = receipt.Status == uint64(1)
-		txStatus = false
+		rStatus := receipt.Status == uint64(1)
+		txStatus := false
 
 		// Procedd if and only if the transaction status is 1
 		if rStatus && receipt.Logs != nil {
@@ -1536,13 +1783,13 @@ func (bc *BlockChain) ParseBlock(block *types.Block, receipts types.Receipts) []
 			if txType == types.CrossShard || txType == types.TxnStatus {
 				index := 0
 				// Extracting transaction execution status information.
-				eventOutput = binary.BigEndian.Uint64(receipt.Logs[0].Data[index+u64Offset : index+elemSize])
+				eventOutput = binary.BigEndian.Uint64(receipt.Logs[0].Data[index+u24 : index+u32])
 				txStatus = eventOutput == uint64(1)
 				// If cross-shard trasnaction, extract the transaction id i.e., a global
 				// unique id for every cross-shard transaction.
 				if txType == types.CrossShard {
-					index += elemSize
-					txID = binary.BigEndian.Uint64(receipt.Logs[0].Data[index+u64Offset : index+elemSize])
+					index += u32
+					txID = binary.BigEndian.Uint64(receipt.Logs[0].Data[index+u24 : index+u32])
 				}
 			} else {
 				log.Debug("rStatus passed", "txType", tx.TxType())
@@ -1555,11 +1802,24 @@ func (bc *BlockChain) ParseBlock(block *types.Block, receipts types.Receipts) []
 		if txStatus {
 			if txType == types.CrossShard {
 				data := tx.Data()[4:]
-				shardsInvolved, involved := bc.DecodeCrossTx(myshard, data)
+				_, shardsInvolved, involved := types.DecodeCrossTx(myshard, data)
 				if involved {
+					if bc.TxBatch() {
+						if _, bok := bc.shardCommits[refNum]; !bok {
+							bc.shardCommits[refNum] = make(map[uint64]common.Hash)
+						}
+						for _, shard := range shardsInvolved {
+							if shard == bc.myshard {
+								continue
+							}
+							if _, sok := bc.shardCommits[shard]; !sok {
+								bc.shardCommits[refNum][shard] = common.Hash{}
+							}
+						}
+					}
 					numShards := len(shardsInvolved)
-					startIndex := (2+1+numShards)*elemSize + elemSize // Last 32 bytes to avoid string length
-					crossTx := bc.ParseCrossTxData(uint16(numShards), data[2+startIndex:])
+					startIndex := (2+1+numShards)*u32 + u32 // Last 32 bytes to avoid string length
+					crossTx := types.ParseCrossTxData(uint16(numShards), data[2+startIndex:])
 					crossTx.BlockNum = block.Number()
 					ctxHash := crossTx.Tx.Hash() // We use hash of the cross-shard transaction as the data.
 
@@ -1572,206 +1832,73 @@ func (bc *BlockChain) ParseBlock(block *types.Block, receipts types.Receipts) []
 						bc.crossTxsMu.Unlock()
 
 						// A map between block number and transaction hash
-						bc.refCrossMu.Lock()
 						bc.refCrossTxs[refNum] = append(bc.refCrossTxs[refNum], ctxHash)
-						bc.refCrossMu.Unlock()
-						log.Info("New cross shard transaction added!", "bn", refNum, "shards", shardsInvolved, "th", ctxHash)
+						log.Info("New cross shard transaction added!", "bn", refNum, "shards", shardsInvolved, "th", ctxHash, "len", len(bc.refCrossTxs[refNum]))
 					}
 				}
 			} else if txType == types.TxnStatus {
-				data := tx.Data()[4:]
-				var (
-					index    = 0
-					shard    uint64
-					tHash    common.Hash
-					root     common.Hash
-					status   uint64
-					decision bool
-					tcb      *types.TxControl
-				)
-				// Structure of decision created by each shard
-				// <shard || txID || tHash || status || root>
-				shard = binary.BigEndian.Uint64(data[index+u64Offset : index+elemSize])
-				index += elemSize
-				txID = binary.BigEndian.Uint64(data[index+u64Offset : index+elemSize])
-				index += elemSize
-				tHash = common.BytesToHash(data[index : index+elemSize])
-				index += elemSize
-				status = binary.BigEndian.Uint64(data[index+u64Offset : index+elemSize])
-				index += elemSize
-				root = common.BytesToHash(data[index : index+elemSize])
-				decision = status == uint64(1)
-
+				shard, _, tHash, bNum, root := types.DecodeDecision(false, tx)
 				bc.crossTxsMu.RLock()
 				tcb, tok := bc.pendingCrossTxs[tHash]
 				bc.crossTxsMu.RUnlock()
-
-				log.Debug("TxnStatus received for", "thash", tHash, "shard", shard, "root", root, "decision", decision, "tok", tok)
-
-				if !decision {
-					// If a shard decides to abort, we delete the corresponding the cross-shard
-					// transaction block.
-					if tok {
-						log.Info("@pc, Deleting cross-tx data", "thash", tHash, "shard", shard, "decision", decision)
-						bc.crossTxsMu.Lock()
-
-						bc.thLockedMu.RLock()
-						_, sok := bc.thLocked[tHash]
-						bc.thLockedMu.RUnlock()
-
-						if sok {
-							tcb.TxControlMu.RLock()
-							keyval := tcb.Keyval
-							tcb.TxControlMu.RUnlock()
-
-							for addr, keys := range keyval {
-								bc.lockedAddrMu.RLock()
-								aclok, aok := bc.lockedAddr[addr]
-								bc.lockedAddrMu.RUnlock()
-
-								if aok {
-									aclok.ClockMu.Lock()
-									for _, key := range keys.Keys {
-										delete(aclok.Keys, key)
-									}
-									clockSize := len(aclok.Keys)
-									aclok.ClockMu.Unlock()
-									if clockSize == 0 {
-										bc.lockedAddrMu.Lock()
-										delete(bc.lockedAddr, addr)
-										bc.lockedAddrMu.Unlock()
-									}
-								}
-							}
-							bc.thLockedMu.Lock()
-							delete(bc.thLocked, tHash)
-							bc.thLockedMu.Unlock()
+				log.Info("TxnStatus received for", "thash", tHash, "shard", shard, "root", root, "tok", tok)
+				// Adding commit for the shard!
+				if tok {
+					commit := &types.TCommit{TxHash: tHash, Shard: shard, BNum: bNum, StateRoot: root}
+					// If all associated shard reply with commit message, promote the
+					// transaction for execution.
+					if bc.TxBatch() {
+						if shard != bc.myshard && bc.AddGCommit(commit) {
+							log.Debug("Ready for data Download!", "thash", tHash)
+							promHashes = append(promHashes, tHash)
 						}
-						delete(bc.pendingCrossTxs, tHash)
-						bc.crossTxsMu.Unlock()
-					}
-				} else {
-					// If the shard decides to commit, add an appropriate commit for the shard!
-					if tok {
-						commit := &types.TCommit{TxHash: tHash, Shard: shard, Status: decision, StateRoot: root}
-						log.Debug("@pc Added commit for", "shard", shard, "th", tHash, "status", status, "root", root)
-						// If all associated shard reply with commit message, promote the
-						// transaction for execution.
+					} else {
 						if tcb.AddTCommit(commit) {
 							promHashes = append(promHashes, tHash)
-							log.Debug("@pc Ready for data Download!", "thash", tHash)
 						}
 						// Updating data imformation about local shard!
-						if shard == bc.myshard {
-							tcb.UpdateLocalStatus(shard)
-						}
+						// if shard == bc.myshard {
+						// 	tcb.UpdateLocalStatus(shard)
+						// }
 					}
+
 				}
+
 			}
 		}
 	}
 	return promHashes
 }
 
-// CleanPendingTx removes commited cross-shard transactions
-func (bc *BlockChain) CleanPendingTx(blockNum uint64) {
-	// for num := range bc.commitments {
-	// 	if num < blockNum {
-	// 		if _, ok := bc.commitments[num]; ok {
-	// 			delete(bc.commitments, num)
-	// 			log.Debug("Cleaning old commitments for", "rbn", num)
-	// 		}
-	// 	}
-	// }
-
-	// for num := range bc.pendingCrossTxs {
-	// 	if num < blockNum {
-	// 		if _, ok := bc.pendingCrossTxs[num]; ok {
-	// 			delete(bc.pendingCrossTxs, num)
-	// 			log.Debug("Cleaning cross shard transactions for", "rbn", num)
-	// 		}
-	// 	}
-	// }
-}
-
-// ParseCrossTxData parsed data
-func (bc *BlockChain) ParseCrossTxData(numShard uint16, data []byte) *types.CrossTx {
-	startIndex := uint16(0)
-	elemSize := uint16(32)
-	addrSize := uint16(20)
-	crossTx := &types.CrossTx{
-		Shards:       []uint64{},
-		AllContracts: make(map[uint64][]types.CKeys),
+// AddGCommit adds a commit value for a client block!
+func (bc *BlockChain) AddGCommit(commit *types.TCommit) bool {
+	shard := commit.Shard
+	bNum := commit.BNum
+	if (bc.shardCommits[bNum][shard] != common.Hash{}) {
+		return false
 	}
-	for i := uint16(0); i < numShard; i++ {
-		shard := binary.BigEndian.Uint16(data[startIndex : startIndex+2])
-
-		crossTx.Shards = append(crossTx.Shards, uint64(shard))
-		crossTx.AllContracts[uint64(shard)] = []types.CKeys{}
-		startIndex = startIndex + 2
-		numContracts := binary.BigEndian.Uint16(data[startIndex : startIndex+2])
-		startIndex = startIndex + 2
-
-		if numContracts > 0 {
-			for j := uint16(0); j < numContracts; j++ {
-				addr := common.BytesToAddress(data[startIndex : startIndex+addrSize])
-				startIndex = startIndex + addrSize
-				numKeys := binary.BigEndian.Uint16(data[startIndex : startIndex+2])
-				startIndex = startIndex + 2
-				cKeys := &types.CKeys{Addr: addr, Keys: []common.Hash{}}
-				for k := uint16(0); k < numKeys; k++ {
-					key := common.BytesToHash(data[startIndex+24 : startIndex+elemSize])
-					cKeys.Keys = append(cKeys.Keys, key)
-					startIndex = startIndex + elemSize
-				}
-				crossTx.AllContracts[uint64(shard)] = append(crossTx.AllContracts[uint64(shard)], *cKeys)
-			}
+	bc.shardCommits[bNum][shard] = commit.StateRoot
+	for _, root := range bc.shardCommits[bNum] {
+		if (root == common.Hash{}) {
+			return false
 		}
 	}
-
-	sender := common.BytesToAddress(data[startIndex : startIndex+addrSize])
-	startIndex = startIndex + addrSize
-	nonce := binary.BigEndian.Uint32(data[startIndex : startIndex+uint16(4)])
-	startIndex = startIndex + uint16(4)
-	value := binary.BigEndian.Uint32(data[startIndex : startIndex+uint16(4)])
-	startIndex = startIndex + uint16(4)
-	receiver := common.BytesToAddress(data[startIndex : startIndex+addrSize])
-	startIndex = startIndex + addrSize
-	gasLimit := binary.BigEndian.Uint64(data[startIndex : startIndex+uint16(8)])
-	startIndex = startIndex + uint16(8)
-	gasPrice := binary.BigEndian.Uint64(data[startIndex : startIndex+uint16(8)])
-	startIndex = startIndex + uint16(8)
-	funcSig := hex.EncodeToString(data[startIndex : startIndex+uint16(4)])
-	startIndex = startIndex + uint16(4)
-	tx := types.NewTransaction(types.CrossShardLocal, uint64(nonce), uint64(0), receiver, big.NewInt(int64(value)), gasLimit, big.NewInt(int64(gasPrice)), data[startIndex:])
-
-	// @sourav, todo: appropriately add the signature extraction procedure
-	crossTx.SetTransaction(tx)
-	crossTx.Tx.SetFrom(types.HomesteadSigner{}, sender)
-
-	log.Debug("New Cross shard Transaction", "hash", crossTx.Tx.Hash(), "from", crossTx.Tx.From(), "to", crossTx.Tx.To(), "nonce", crossTx.Tx.Nonce(), "value", crossTx.Tx.Value(), "function", funcSig, "params", hex.EncodeToString(data[startIndex:]))
-	return crossTx
+	return true
 }
 
-// DecodeCrossTx extracts shards
-func (bc *BlockChain) DecodeCrossTx(myshard uint64, data []byte) ([]uint64, bool) {
-	elemSize := uint64(32)
-	lenData := data[2*elemSize+elemSize-8 : 3*elemSize]
-	length := binary.BigEndian.Uint64(lenData)
-	startIndex := 3 * elemSize
-	var (
-		involved = false
-		shards   []uint64
-	)
-	for i := uint64(0); i < length; i++ {
-		shardData := data[startIndex+i*elemSize+24 : startIndex+(i+1)*elemSize]
-		shard := binary.BigEndian.Uint64(shardData)
-		if shard == myshard {
-			involved = true
-		}
-		shards = append(shards, shard)
-	}
-	return shards, involved
+// Commit returns value committed by a shard!
+func (bc *BlockChain) Commit(bNum, shard uint64) common.Hash {
+	return bc.shardCommits[bNum][shard]
+}
+
+// Tcb returns trasnaction control block of a transaction
+func (bc *BlockChain) Tcb(hash common.Hash) *types.TxControl {
+	return bc.pendingCrossTxs[hash]
+}
+
+// RefCrossTxs returns cross shard transaction
+func (bc *BlockChain) RefCrossTxs(bNum uint64) []common.Hash {
+	return bc.refCrossTxs[bNum]
 }
 
 // insertStats tracks and reports on block insertion.
@@ -1950,13 +2077,13 @@ func (bc *BlockChain) Ref() bool {
 }
 
 // PostForeignDataEvent posts after downloading foreign data
-func (bc *BlockChain) PostForeignDataEvent(tHash common.Hash) {
-	log.Debug("Foreign Data posted for ", "tHash", tHash)
-	bc.promCrossMu.Lock()
-	defer bc.promCrossMu.Unlock()
-	if _, ok := bc.promCrossTxs[tHash]; !ok {
-		bc.promCrossTxs[tHash] = false
+func (bc *BlockChain) PostForeignDataEvent(hashes []common.Hash) {
+	for _, hash := range hashes {
+		if _, ok := bc.promCrossTxs[hash]; !ok {
+			bc.promCrossTxs[hash] = false
+		}
 	}
+	log.Info("Foreign data posted for", "len", len(hashes))
 	select {
 	case bc.foreignDataCh <- struct{}{}:
 	default:
