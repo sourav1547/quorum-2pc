@@ -1363,10 +1363,10 @@ func (w *worker) commitNewTransactions(tHashes []common.Hash, coinbase common.Ad
 		decisions[tcb.RefNum] = true
 
 		dataLen := 4 + 4*32
-		txidByte := make([]byte, 32)
-		binary.BigEndian.PutUint64(txidByte[24:], tcb.TxID)
 		shardByte := make([]byte, 32)
 		binary.BigEndian.PutUint64(shardByte[24:], w.chain.MyShard())
+		txidByte := make([]byte, 32)
+		binary.BigEndian.PutUint64(txidByte[24:], tcb.TxID)
 		bNumByte := make([]byte, 32)
 		binary.BigEndian.PutUint64(bNumByte[24:], tcb.RefNum)
 		data := make([]byte, dataLen)
@@ -1374,8 +1374,8 @@ func (w *worker) commitNewTransactions(tHashes []common.Hash, coinbase common.Ad
 		start += copy(data[start:], funcAddress)   // function hash
 		start += copy(data[start:], shardByte)     // shard
 		start += copy(data[start:], txidByte)      // tx id
-		start += copy(data[start:], tHash.Bytes()) // transaction hash
 		start += copy(data[start:], bNumByte)      // blockNum
+		start += copy(data[start:], tHash.Bytes()) // transaction hash
 
 		statusTx := types.NewTransaction(types.LocalDecision, uint64(ccount), w.eth.MyShard(), w.chain.CommitAddress(), big.NewInt(0), w.txGasLimit, big.NewInt(0), data)
 

@@ -1520,15 +1520,15 @@ func (bc *BlockChain) insertChain(chain types.Blocks) (int, []interface{}, []*ty
 			}
 
 			// Parse transactions in reference chain to check for new state commitments
-			if bc.ref {
-				hashes := bc.ParseBlock(block, receipts)
-				promHashes = append(promHashes, hashes...)
-			}
-
 			if bc.myshard == uint64(0) {
 				bc.UpdateRefStatus(block, receipts)
 			} else {
-				bc.UpdateShardStatus(block, receipts)
+				if bc.ref {
+					hashes := bc.ParseBlock(block, receipts)
+					promHashes = append(promHashes, hashes...)
+				} else {
+					bc.UpdateShardStatus(block, receipts)
+				}
 			}
 
 		case SideStatTy:
@@ -1590,7 +1590,7 @@ func (bc *BlockChain) UpdateShardStatus(block *types.Block, receipts types.Recei
 	defer bc.rwLockedMu.Unlock()
 	var (
 		ccount = 0
-		croot  = block.Root()
+		csl    = 0
 	)
 	for _, tx := range block.Transactions() {
 		txType := tx.TxType()
@@ -1613,19 +1613,20 @@ func (bc *BlockChain) UpdateShardStatus(block *types.Block, receipts types.Recei
 					}
 				}
 			}
+			csl++
 			delete(bc.promCrossTxs, tHash)
 		} else if txType == types.LocalDecision {
-			_, _, tHash, bNum, _ := types.DecodeDecision(true, tx)
-			tcb, tok := bc.pendingCrossTxs[tHash]
+			_, _, bNum, tHash, _ := types.DecodeDecision(true, tx)
+			_, tok := bc.pendingCrossTxs[tHash]
 			if !tok {
 				log.Warn("Transaction control block not found", "hash", tHash)
 				continue
 			}
 			// Adding self decision/commit
-			commit := &types.TCommit{TxHash: tHash, Shard: bc.myshard, BNum: bNum, StateRoot: croot}
-			if !bc.TxBatch() {
-				tcb.AddTCommit(commit)
-			}
+			// commit := &types.TCommit{TxHash: tHash, Shard: bc.myshard, BNum: bNum, StateRoot: croot}
+			// if !bc.TxBatch() {
+			// 	tcb.AddTCommit(commit)
+			// }
 			hashes := []common.Hash{tHash}
 			if bc.TxBatch() {
 				hashes = bc.refCrossTxs[bNum]
@@ -1656,6 +1657,7 @@ func (bc *BlockChain) UpdateShardStatus(block *types.Block, receipts types.Recei
 		}
 	}
 	bc.AddCount(ccount)
+	log.Info("Proocessed block", "num", block.NumberU64(), "csl", csl, "dec", ccount)
 }
 
 // UpdateRefStatus updates current reference statsus
@@ -1683,10 +1685,10 @@ func (bc *BlockChain) UpdateRefStatus(block *types.Block, receipts types.Receipt
 				eventOut = binary.BigEndian.Uint64(receipt.Logs[0].Data[u64Offset:])
 				tStatus = eventOut == uint64(1)
 			} else {
-				log.Debug("Not a relavent transaction", "status", rStatus, "txType", txType)
+				log.Info("Not a relavent transaction", "status", rStatus, "txType", txType)
 			}
 		} else {
-			log.Debug("Not parsing transaction", "rs", rStatus, "txType", txType, "logs", receipt.Logs)
+			log.Info("Not parsing transaction", "rs", rStatus, "txType", txType, "logs", receipt.Logs)
 		}
 
 		if tStatus {
@@ -1837,11 +1839,11 @@ func (bc *BlockChain) ParseBlock(block *types.Block, receipts types.Receipts) []
 					}
 				}
 			} else if txType == types.TxnStatus {
-				shard, _, tHash, bNum, root := types.DecodeDecision(false, tx)
+				shard, _, bNum, tHash, root := types.DecodeDecision(false, tx)
 				bc.crossTxsMu.RLock()
 				tcb, tok := bc.pendingCrossTxs[tHash]
 				bc.crossTxsMu.RUnlock()
-				log.Info("TxnStatus received for", "thash", tHash, "shard", shard, "root", root, "tok", tok)
+				log.Debug("TxnStatus received for", "thash", tHash, "shard", shard, "root", root, "tok", tok)
 				// Adding commit for the shard!
 				if tok {
 					commit := &types.TCommit{TxHash: tHash, Shard: shard, BNum: bNum, StateRoot: root}
@@ -1853,17 +1855,14 @@ func (bc *BlockChain) ParseBlock(block *types.Block, receipts types.Receipts) []
 							promHashes = append(promHashes, tHash)
 						}
 					} else {
+						if shard == bc.myshard {
+							continue
+						}
 						if tcb.AddTCommit(commit) {
 							promHashes = append(promHashes, tHash)
 						}
-						// Updating data imformation about local shard!
-						// if shard == bc.myshard {
-						// 	tcb.UpdateLocalStatus(shard)
-						// }
 					}
-
 				}
-
 			}
 		}
 	}
@@ -2083,7 +2082,7 @@ func (bc *BlockChain) PostForeignDataEvent(hashes []common.Hash) {
 			bc.promCrossTxs[hash] = false
 		}
 	}
-	log.Info("Foreign data posted for", "len", len(hashes))
+	log.Debug("Foreign data posted for", "len", len(hashes))
 	select {
 	case bc.foreignDataCh <- struct{}{}:
 	default:

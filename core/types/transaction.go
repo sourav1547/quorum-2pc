@@ -793,7 +793,7 @@ func DecodeAck(stx *Transaction) (uint64, uint64, uint64, common.Hash) {
 }
 
 // DecodeDecision decodes elements of a local decision
-func DecodeDecision(local bool, tx *Transaction) (uint64, uint64, common.Hash, uint64, common.Hash) {
+func DecodeDecision(local bool, tx *Transaction) (uint64, uint64, uint64, common.Hash, common.Hash) {
 	var (
 		u32   = 32
 		u24   = 24
@@ -804,15 +804,15 @@ func DecodeDecision(local bool, tx *Transaction) (uint64, uint64, common.Hash, u
 	index += u32
 	txID := binary.BigEndian.Uint64(data[index+u24 : index+u32])
 	index += u32
-	tHash := common.BytesToHash(data[index : index+u32])
-	index += u32
 	bNum := binary.BigEndian.Uint64(data[index+u24 : index+u32])
+	index += u32
+	tHash := common.BytesToHash(data[index : index+u32])
 	root := common.Hash{}
 	if !local {
 		index += u32
 		root = common.BytesToHash(data[index : index+u32])
 	}
-	return shard, txID, tHash, bNum, root
+	return shard, txID, bNum, tHash, root
 }
 
 // CLock stores currently locked keys of a contract
@@ -939,12 +939,9 @@ func (tcb *TxControl) AddTCommit(commit *TCommit) bool {
 	tcb.TxControlMu.Lock()
 	defer tcb.TxControlMu.Unlock()
 
-	shard := commit.Shard
-	if _, sok := tcb.CommitStatus[shard]; !sok {
-		count := tcb.Commits.AddCommit(shard, commit)
-		if count == tcb.Required {
-			return true
-		}
+	count := tcb.Commits.AddCommit(commit.Shard, commit)
+	if count == tcb.Required {
+		return true
 	}
 	return false
 }

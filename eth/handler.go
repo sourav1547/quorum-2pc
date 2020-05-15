@@ -1213,10 +1213,8 @@ func (pm *ProtocolManager) BroadcastBlock(block *types.Block, propagate bool) {
 				log.Debug("Propagated block3", "hash", hash, "recipients", len(transfer), "duration", common.PrettyDuration(time.Since(block.ReceivedAt)))
 
 				var (
-					start   = 0
 					u24     = 24
 					u32     = 32
-					txData  []byte
 					txs     []*types.Transaction
 					dataLen int
 					croot   = block.Root()
@@ -1229,14 +1227,15 @@ func (pm *ProtocolManager) BroadcastBlock(block *types.Block, propagate bool) {
 				binary.BigEndian.PutUint64(shardByte[24:], pm.myshard)
 				for _, tx := range block.Transactions() {
 					txType := tx.TxType()
-					txData = tx.Data()
+					txData := tx.Data()
+					start := 0
 					if txType == types.LocalDecision {
 						dataLen = 4 + 5*u32
 						data := make([]byte, dataLen)
 						start += copy(data[start:], decSig)    // function sig
 						start += copy(data[start:], shardByte) // shard
 						index := 4 + u32
-						start += copy(data[start:], txData[index:index+3*u32]) // tid, tHash, bNum
+						start += copy(data[start:], txData[index:index+3*u32]) // tid, bNum, tHash
 						start += copy(data[start:], croot.Bytes())             // root
 						nonce := pm.blockchain.AtomicNonce()
 						dTx := types.NewTransaction(types.TxnStatus, nonce, pm.myshard, pm.refAddress, big.NewInt(0), pm.stateGasLimit, pm.stateGasPrice, data)
@@ -1253,16 +1252,16 @@ func (pm *ProtocolManager) BroadcastBlock(block *types.Block, propagate bool) {
 						// Preparing data
 						dataLen = 4 + 4*u32
 						data := make([]byte, dataLen)
+						txidByte := make([]byte, u32)
 						bNumByte := make([]byte, u32)
-						txidByte := make([]byte, 32)
-						binary.BigEndian.PutUint64(txidByte[24:], tcb.TxID)
+						binary.BigEndian.PutUint64(txidByte[u24:], tcb.TxID)
 						binary.BigEndian.PutUint64(bNumByte[u24:], tcb.RefNum)
 						// Copying data!
 						start += copy(data[start:], ackSig)    // function sig
 						start += copy(data[start:], shardByte) // shard id
 						start += copy(data[start:], txidByte)  // txID
+						start += copy(data[start:], bNumByte)  // reference number
 						start += copy(data[start:], tHash.Bytes())
-						start += copy(data[start:], bNumByte) // reference number
 						nonce := pm.blockchain.AtomicNonce()
 						// Creating the acknowledgement transaction and appending it to the
 						// list
@@ -1385,7 +1384,7 @@ func (pm *ProtocolManager) BroadcastRtxs(txs types.Transactions) {
 		for _, peer := range peers {
 			txset[peer] = append(txset[peer], tx)
 		}
-		log.Info("Queing decision/ack transaction", "hash", tx.Hash(), "type", tx.TxType(), "nonce", tx.Nonce(), "recipients", len(peers))
+		log.Debug("Queing decision/ack transaction", "hash", tx.Hash(), "type", tx.TxType(), "nonce", tx.Nonce(), "recipients", len(peers))
 	}
 	// FIXME include this again: peers = peers[:int(math.Sqrt(float64(len(peers))))]
 	for peer, txs := range txset {
