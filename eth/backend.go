@@ -76,13 +76,13 @@ type Ethereum struct {
 	promCrossTxs    map[common.Hash]bool //Promoted Transactions
 	promCrossMu     sync.RWMutex
 	pendingCrossTxs map[common.Hash]*types.TxControl // Pending Cross shard transactions
-	crossTxsMu      sync.RWMutex                     // Lock for pendingCrossTs
 
 	refCrossTxs map[uint64][]common.Hash
 	shardThMap  map[uint64]map[uint64][]common.Hash
 
 	rwLocked   map[common.Address]*types.CLock // Counter of currently locked keys
 	rwLockedMu sync.RWMutex
+	logdir     string
 
 	// Handlers
 	txPool          *core.TxPool
@@ -223,6 +223,8 @@ func New(ctx *node.ServiceContext, config *Config) (*Ethereum, error) {
 		log.Info("Address created for ", "shard", i, "address", common.BigToAddress(addr))
 	}
 	eth.txBatch = config.TxBatch == uint64(1) // TxBatch==1 indicates batching is enabled
+	eth.logdir = "/Users/sourav/tpc/log/"
+	// eth.logdir = "/mnt/ssd/tpc/log/"
 
 	// force to set the istanbul etherbase to node key address
 	if chainConfig.Istanbul != nil {
@@ -246,8 +248,8 @@ func New(ctx *node.ServiceContext, config *Config) (*Ethereum, error) {
 		}
 		cacheConfig = &core.CacheConfig{Disabled: config.NoPruning, TrieNodeLimit: config.TrieCache, TrieTimeLimit: config.TrieTimeout}
 	)
-	eth.blockchain, err = core.NewBlockChain(chainDb, cacheConfig, eth.chainConfig, eth.engine, vmConfig, eth.shouldPreserve, false, config.MyShard, config.NumShard, eth.txBatch, eth.pendingCrossTxs, eth.crossTxsMu, eth.promCrossTxs, eth.promCrossMu, eth.rwLocked, eth.rwLockedMu, eth.refCrossTxs, eth.shardThMap)
-	eth.refchain, rerr = core.NewBlockChain(refDb, cacheConfig, eth.chainConfig, eth.engine, vmConfig, eth.shouldPreserve, true, config.MyShard, config.NumShard, eth.txBatch, eth.pendingCrossTxs, eth.crossTxsMu, eth.promCrossTxs, eth.promCrossMu, eth.rwLocked, eth.rwLockedMu, eth.refCrossTxs, eth.shardThMap)
+	eth.blockchain, err = core.NewBlockChain(chainDb, cacheConfig, eth.chainConfig, eth.engine, vmConfig, eth.shouldPreserve, false, config.MyShard, config.NumShard, eth.txBatch, eth.pendingCrossTxs, eth.promCrossTxs, eth.promCrossMu, eth.rwLocked, eth.rwLockedMu, eth.refCrossTxs, eth.shardThMap, eth.logdir)
+	eth.refchain, rerr = core.NewBlockChain(refDb, cacheConfig, eth.chainConfig, eth.engine, vmConfig, eth.shouldPreserve, true, config.MyShard, config.NumShard, eth.txBatch, eth.pendingCrossTxs, eth.promCrossTxs, eth.promCrossMu, eth.rwLocked, eth.rwLockedMu, eth.refCrossTxs, eth.shardThMap, eth.logdir)
 	if err != nil {
 		return nil, err
 	}
@@ -265,11 +267,11 @@ func New(ctx *node.ServiceContext, config *Config) (*Ethereum, error) {
 	}
 	eth.txPool = core.NewTxPool(config.TxPool, eth.chainConfig, eth.refAddress, eth.myShard, eth.shardAddMap, eth.blockchain)
 
-	if eth.protocolManager, err = NewProtocolManager(eth.chainConfig, config.SyncMode, config.NumShard, config.MyShard, config.NetworkId, eth.eventMux, eth.rEventMux, eth.txPool, eth.engine, eth.blockchain, eth.refchain, eth.refAddress, eth.shardAddMap, chainDb, refDb, eth.pendingCrossTxs, eth.crossTxsMu, config.RaftMode); err != nil {
+	if eth.protocolManager, err = NewProtocolManager(eth.chainConfig, config.SyncMode, config.NumShard, config.MyShard, config.NetworkId, eth.eventMux, eth.rEventMux, eth.txPool, eth.engine, eth.blockchain, eth.refchain, eth.refAddress, eth.shardAddMap, chainDb, refDb, config.RaftMode, eth.logdir); err != nil {
 		return nil, err
 	}
 
-	eth.miner = miner.New(eth, eth.chainConfig, eth.EventMux(), eth.engine, config.MinerRecommit, config.MinerGasFloor, config.MinerGasCeil, eth.isLocalBlock, eth.pendingCrossTxs, eth.crossTxsMu, eth.promCrossTxs, eth.promCrossMu, eth.rwLocked, eth.rwLockedMu)
+	eth.miner = miner.New(eth, eth.chainConfig, eth.EventMux(), eth.engine, config.MinerRecommit, config.MinerGasFloor, config.MinerGasCeil, eth.isLocalBlock, eth.promCrossTxs, eth.promCrossMu, eth.rwLocked, eth.rwLockedMu, eth.logdir)
 	eth.miner.SetExtra(makeExtraData(config.MinerExtraData, eth.chainConfig.IsQuorum))
 
 	hexNodeId := fmt.Sprintf("%x", crypto.FromECDSAPub(&ctx.NodeKey().PublicKey)[1:]) // Quorum

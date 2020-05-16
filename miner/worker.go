@@ -141,19 +141,16 @@ type worker struct {
 	eth    Backend
 	chain  *core.BlockChain
 
-	refHashLock     sync.RWMutex
-	refNumberLock   sync.RWMutex
-	refHash         common.Hash                      // Hash of the last knwon reference block
-	refNumber       *big.Int                         // Last know reference block
-	pendingCrossTxs map[common.Hash]*types.TxControl // Pending Cross shard transactions
-	crossTxsMu      sync.RWMutex
-
-	batch      bool
-	rwLocked   map[common.Address]*types.CLock
-	rwLockedMu sync.RWMutex
-
-	cUnlocked map[common.Address]*types.CLock // Currently unlocked keys
-	cLocked   map[common.Address]*types.CLock // Currently locked keys
+	refHashLock   sync.RWMutex
+	refNumberLock sync.RWMutex
+	refHash       common.Hash // Hash of the last knwon reference block
+	refNumber     *big.Int    // Last know reference block
+	batch         bool
+	rwLocked      map[common.Address]*types.CLock
+	rwLockedMu    sync.RWMutex
+	cUnlocked     map[common.Address]*types.CLock // Currently unlocked keys
+	cLocked       map[common.Address]*types.CLock // Currently locked keys
+	logdir        string
 
 	promCrossTxs map[common.Hash]bool
 	promCrossMu  sync.RWMutex
@@ -222,7 +219,7 @@ type worker struct {
 	resubmitHook func(time.Duration, time.Duration) // Method to call upon updating resubmitting interval.
 }
 
-func newWorker(config *params.ChainConfig, engine consensus.Engine, eth Backend, mux *event.TypeMux, recommit time.Duration, gasFloor, gasCeil uint64, isLocalBlock func(*types.Block) bool, pendingCrossTxs map[common.Hash]*types.TxControl, crossTxsMu sync.RWMutex, promCrossTxs map[common.Hash]bool, promCrossMu sync.RWMutex, rwLocked map[common.Address]*types.CLock, rwLockedMu sync.RWMutex) *worker {
+func newWorker(config *params.ChainConfig, engine consensus.Engine, eth Backend, mux *event.TypeMux, recommit time.Duration, gasFloor, gasCeil uint64, isLocalBlock func(*types.Block) bool, promCrossTxs map[common.Hash]bool, promCrossMu sync.RWMutex, rwLocked map[common.Address]*types.CLock, rwLockedMu sync.RWMutex, logdir string) *worker {
 	worker := &worker{
 		config:             config,
 		engine:             engine,
@@ -249,8 +246,6 @@ func newWorker(config *params.ChainConfig, engine consensus.Engine, eth Backend,
 		startCh:            make(chan struct{}, 1),
 		resubmitIntervalCh: make(chan time.Duration),
 		resubmitAdjustCh:   make(chan *intervalAdjust, resubmitAdjustChanSize),
-		pendingCrossTxs:    pendingCrossTxs,
-		crossTxsMu:         crossTxsMu,
 		rwLocked:           rwLocked,
 		rwLockedMu:         rwLockedMu,
 		cUnlocked:          make(map[common.Address]*types.CLock),
@@ -801,16 +796,15 @@ func (w *worker) makeCurrent(parent *types.Block, header *types.Header) error {
 // This function unlocks locked keys if the transaction is an acknowledgemnt
 func (w *worker) unlockShardKeys(shardTxs map[common.Address]types.Transactions) {
 	// It assumes that w.rwLockeMu is already locked
-	log.Info("@stx Unlocking shard keys!")
-	for _, txs := range shardTxs {
+	for addr, txs := range shardTxs {
 		for _, tx := range txs {
+			log.Info("@stx Unlocking shard keys", "addr", addr, "tt", tx.TxType(), "hash", tx.Hash())
 			if tx.TxType() == types.Acknowledgement {
 				shard, _, bNum, tHash := types.DecodeAck(tx)
 				shardThs := []common.Hash{tHash}
 				if w.batch {
 					shardThs = w.chain.ShardThMap(bNum, shard)
 				}
-
 				for _, hash := range shardThs {
 					lockedAddrs, tok := w.chain.ThKeys(hash, shard)
 					if tok && len(lockedAddrs) > 0 {
@@ -1012,7 +1006,7 @@ func (w *worker) NewStatusTransactions(start, end uint64) []common.Hash {
 // updates curret locked status for a shard!
 func (w *worker) updateShardLockStatus(hash common.Hash) {
 	myshard := w.eth.MyShard()
-	tcb := w.chain.Tcb(hash)
+	tcb, _ := w.chain.Tcb(hash)
 	addrToShard := tcb.AddrToShard
 	keyVal := tcb.Keyval
 	for addr, cKeys := range keyVal {
@@ -1040,7 +1034,7 @@ func (w *worker) getPromotedTransactions() []common.Hash {
 	var pTxs []common.Hash
 	if len(w.promCrossTxs) > 0 {
 		for th := range w.promCrossTxs {
-			if w.pendingCrossTxs[th].Status {
+			if w.chain.CrossTxStatus(th) {
 				pTxs = append(pTxs, th)
 			}
 		}
@@ -1261,7 +1255,7 @@ func (w *worker) commitCrossTransactions(tHashes []common.Hash, coinbase common.
 			return atomic.LoadInt32(interrupt) == commitInterruptNewHead
 		}
 
-		tcb = w.pendingCrossTxs[tHash]
+		tcb, _ = w.chain.Tcb(tHash)
 		tx = tcb.Tx
 
 		if !tcb.Status {
@@ -1350,9 +1344,7 @@ func (w *worker) commitNewTransactions(tHashes []common.Hash, coinbase common.Ad
 			return atomic.LoadInt32(interrupt) == commitInterruptNewHead
 		}
 
-		// TxID
-		w.crossTxsMu.RLock()
-		tcb, tok := w.pendingCrossTxs[tHash]
+		tcb, tok := w.chain.Tcb(tHash)
 		if !tok {
 			continue
 		}

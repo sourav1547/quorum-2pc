@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"math"
 	"math/big"
+	"os"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -99,9 +100,7 @@ type ProtocolManager struct {
 	cousinPeerLock  sync.RWMutex
 	shardAddMap     map[uint64]*big.Int
 	shardAddMapLock sync.RWMutex
-
-	pendingCrossTxs map[common.Hash]*types.TxControl
-	crossTxsMu      sync.RWMutex
+	logdir          string
 
 	SubProtocols []p2p.Protocol
 
@@ -129,32 +128,31 @@ type ProtocolManager struct {
 
 // NewProtocolManager returns a new Ethereum sub protocol manager. The Ethereum sub protocol manages peers capable
 // with the Ethereum network.
-func NewProtocolManager(config *params.ChainConfig, mode downloader.SyncMode, numShard, myshard, networkID uint64, mux, rmux *event.TypeMux, txpool txPool, engine consensus.Engine, blockchain, refchain *core.BlockChain, refAddress common.Address, shardAddMap map[uint64]*big.Int, chaindb, refdb ethdb.Database, pendingCrossTxs map[common.Hash]*types.TxControl, crossTxsMu sync.RWMutex, raftMode bool) (*ProtocolManager, error) {
+func NewProtocolManager(config *params.ChainConfig, mode downloader.SyncMode, numShard, myshard, networkID uint64, mux, rmux *event.TypeMux, txpool txPool, engine consensus.Engine, blockchain, refchain *core.BlockChain, refAddress common.Address, shardAddMap map[uint64]*big.Int, chaindb, refdb ethdb.Database, raftMode bool, logdir string) (*ProtocolManager, error) {
 	// Create the protocol manager with the base fields
 	manager := &ProtocolManager{
-		numShard:        numShard,
-		myshard:         myshard,
-		stateGasLimit:   uint64(500000),
-		stateGasPrice:   big.NewInt(0),
-		networkID:       networkID,
-		eventMux:        mux,
-		rEventMux:       rmux,
-		txpool:          txpool,
-		blockchain:      blockchain,
-		refchain:        refchain,
-		refAddress:      refAddress,
-		chainconfig:     config,
-		cousinPeers:     make(map[uint64]*peerSet),
-		shardAddMap:     make(map[uint64]*big.Int),
-		pendingCrossTxs: pendingCrossTxs,
-		crossTxsMu:      crossTxsMu,
-		newPeerCh:       make(chan *peer),
-		noMorePeers:     make(chan struct{}),
-		txsyncCh:        make(chan *txsync),
-		quitSync:        make(chan struct{}),
-		rQuitSync:       make(chan struct{}),
-		raftMode:        raftMode,
-		engine:          engine,
+		numShard:      numShard,
+		myshard:       myshard,
+		stateGasLimit: uint64(500000),
+		stateGasPrice: big.NewInt(0),
+		networkID:     networkID,
+		eventMux:      mux,
+		rEventMux:     rmux,
+		txpool:        txpool,
+		blockchain:    blockchain,
+		refchain:      refchain,
+		refAddress:    refAddress,
+		chainconfig:   config,
+		cousinPeers:   make(map[uint64]*peerSet),
+		shardAddMap:   make(map[uint64]*big.Int),
+		newPeerCh:     make(chan *peer),
+		noMorePeers:   make(chan struct{}),
+		txsyncCh:      make(chan *txsync),
+		quitSync:      make(chan struct{}),
+		rQuitSync:     make(chan struct{}),
+		raftMode:      raftMode,
+		engine:        engine,
+		logdir:        logdir,
 	}
 
 	// manager.shardAddMapLock.Lock()
@@ -971,7 +969,15 @@ func (pm *ProtocolManager) handleMsg(p *peer) error {
 		root := request.Root
 		vals := request.Vals
 		log.Debug("Received response from", "pshard", p.Shard(), "tHash", tHash, "root", root, "length", len(vals))
-
+		// Logging message information!
+		dresp := pm.logdir + "dresp" // + strconv.Itoa(int(pm.myshard))
+		drespf, err := os.OpenFile(dresp, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+		if err != nil {
+			log.Error("Can't open dresp file", "error", err)
+		}
+		fmt.Fprintln(drespf, tHash.Hex(), p.Shard(), len(vals), root.Hex(), p.ID(), time.Now().Unix())
+		drespf.Close()
+		// Adding data!
 		go pm.AddFetchedData(tHash, p.Shard(), vals)
 
 	default:
@@ -986,7 +992,7 @@ func (pm *ProtocolManager) Enqueue(id string, block *types.Block) {
 
 // AddFetchedData fills the data cache with data downloaded from peer
 func (pm *ProtocolManager) AddFetchedData(tHash common.Hash, pshard uint64, vals []*types.KeyVal) {
-	ftcb, ftok := pm.pendingCrossTxs[tHash]
+	ftcb, ftok := pm.blockchain.Tcb(tHash)
 	if !ftok {
 		log.Warn("Transacion control block not found", "thash", tHash)
 		return
@@ -1009,7 +1015,7 @@ func (pm *ProtocolManager) AddFetchedData(tHash common.Hash, pshard uint64, vals
 	// Add data to all transactions!
 	promote := true
 	for _, hash := range hashes {
-		tcb, tok := pm.pendingCrossTxs[hash]
+		tcb, tok := pm.blockchain.Tcb(hash)
 		if tok {
 			if !tcb.AddData(pshard, mkvals) {
 				promote = false
@@ -1026,19 +1032,19 @@ func (pm *ProtocolManager) AddFetchedData(tHash common.Hash, pshard uint64, vals
 
 // FetchData requests data from appropriate shard
 func (pm *ProtocolManager) FetchData(tHash common.Hash) {
-	ftcb, ftok := pm.pendingCrossTxs[tHash]
+	ftcb, ftok := pm.blockchain.Tcb(tHash)
 	if !ftok {
 		log.Warn("Transaction Control block not found", "hash", tHash)
 	}
-
+	refNum := ftcb.RefNum
 	hashes := []common.Hash{tHash}
 	if pm.blockchain.TxBatch() {
-		hashes = pm.refchain.RefCrossTxs(ftcb.RefNum)
+		hashes = pm.refchain.RefCrossTxs(refNum)
 	}
 	// Downloading keys!
 	dKeys := make(map[uint64]map[common.Address]map[common.Hash]bool)
 	for _, hash := range hashes {
-		if tcb, tok := pm.pendingCrossTxs[hash]; tok {
+		if tcb, tok := pm.blockchain.Tcb(hash); tok {
 			for addr, cKeys := range tcb.Keyval {
 				shard := tcb.AddrToShard[addr]
 				if shard == pm.myshard {
@@ -1062,22 +1068,24 @@ func (pm *ProtocolManager) FetchData(tHash common.Hash) {
 	for shard := range dKeys {
 		var root common.Hash
 		if pm.refchain.TxBatch() {
-			root = pm.refchain.Commit(ftcb.RefNum, shard)
+			root = pm.refchain.Commit(refNum, shard)
 		} else {
 			root = ftcb.Commits.Commits[shard].StateRoot
 		}
-		go pm.FetchDataShard(tHash, dKeys[shard], shard, root)
+		go pm.FetchDataShard(refNum, tHash, dKeys[shard], shard, root)
 	}
 }
 
 // FetchDataShard sends request for each data
-func (pm *ProtocolManager) FetchDataShard(tHash common.Hash, sKeys map[common.Address]map[common.Hash]bool, shard uint64, root common.Hash) {
+func (pm *ProtocolManager) FetchDataShard(refNum uint64, tHash common.Hash, sKeys map[common.Address]map[common.Hash]bool, shard uint64, root common.Hash) {
 	var keys []*types.CKeys
 	count := 0
+	kcount := 0
 	for addr, cKeys := range sKeys {
 		newck := &types.CKeys{Addr: addr}
 		for key := range cKeys {
 			newck.Keys = append(newck.Keys, key)
+			kcount++
 		}
 		keys = append(keys, newck)
 		count++
@@ -1097,7 +1105,15 @@ func (pm *ProtocolManager) FetchDataShard(tHash common.Hash, sKeys map[common.Ad
 		requestLen = len(peers)
 	}
 	requests := peers[:uint64(requestLen)]
+	// Creating file!
+	dreq := pm.logdir + "dreq"
+	dreqf, err := os.OpenFile(dreq, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		log.Error("Can't open dreq file", "error", err)
+	}
+	defer dreqf.Close()
 	for _, peer := range requests {
+		fmt.Fprintln(dreqf, refNum, tHash.Hex(), count, kcount, root.Hex(), peer.ID(), time.Now().Unix())
 		peer.SendDataRequest(tHash, uint64(count), root, keys)
 	}
 	return
@@ -1243,7 +1259,7 @@ func (pm *ProtocolManager) BroadcastBlock(block *types.Block, propagate bool) {
 
 					} else if txType == types.CrossShardLocal {
 						tHash := tx.Hash()
-						tcb := pm.pendingCrossTxs[tHash]
+						tcb, _ := pm.blockchain.Tcb(tHash)
 						// If batching and already acknowledged!
 						if pm.blockchain.TxBatch() && acks[tcb.RefNum] {
 							continue

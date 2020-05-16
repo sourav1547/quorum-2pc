@@ -83,9 +83,7 @@ func (p *StateProcessor) Process(block *types.Block, statedb, privateState *stat
 		psnap := privateState.Snapshot()
 
 		if txType == types.CrossShardLocal {
-			p.bc.crossTxsMu.RLock()
-			tcb = p.bc.pendingCrossTxs[tHash]
-			p.bc.crossTxsMu.RUnlock()
+			tcb, _ = p.bc.Tcb(tHash)
 		} else {
 			tcb = nil
 		}
@@ -140,7 +138,7 @@ func ApplyTransaction(config *params.ChainConfig, bc *BlockChain, author *common
 	}
 
 	// Updating the address of the transaction
-	if tx.TxType() == types.TxnStatus {
+	if tx.TxType() == types.TxnStatus || tx.TxType() == types.Acknowledgement {
 		commitAddress := bc.CommitAddress()
 		tx.SetRecipient(&commitAddress)
 	}

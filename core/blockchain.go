@@ -24,6 +24,7 @@ import (
 	"io"
 	"math/big"
 	mrand "math/rand"
+	"os"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -124,7 +125,6 @@ type BlockChain struct {
 	nonce           uint64
 	commitAddress   common.Address                   // Address of state commitment transaction
 	pendingCrossTxs map[common.Hash]*types.TxControl // Pending Cross shard transactions
-	crossTxsMu      sync.RWMutex
 	refCrossTxs     map[uint64][]common.Hash
 	promCrossTxs    map[common.Hash]bool
 	promCrossMu     sync.RWMutex
@@ -134,6 +134,7 @@ type BlockChain struct {
 	thKeys     map[common.Hash]map[uint64][]*types.CKeys // address locked by a transaction
 	rwLocked   map[common.Address]*types.CLock
 	rwLockedMu sync.RWMutex
+	logdir     string
 
 	shardCommits map[uint64]map[uint64]common.Hash // commits of all shards involved in cross shard transaction
 
@@ -187,7 +188,7 @@ type BlockChain struct {
 // NewBlockChain returns a fully initialised block chain using information
 // available in the database. It initialises the default Ethereum Validator and
 // Processor.
-func NewBlockChain(db ethdb.Database, cacheConfig *CacheConfig, chainConfig *params.ChainConfig, engine consensus.Engine, vmConfig vm.Config, shouldPreserve func(block *types.Block) bool, ref bool, shard, numShard uint64, txBatch bool, pendingCrossTxs map[common.Hash]*types.TxControl, crossTxMu sync.RWMutex, promCrossTxs map[common.Hash]bool, promCrossMu sync.RWMutex, rwLocked map[common.Address]*types.CLock, rwLockedMu sync.RWMutex, refCrossTxs map[uint64][]common.Hash, shardThMap map[uint64]map[uint64][]common.Hash) (*BlockChain, error) {
+func NewBlockChain(db ethdb.Database, cacheConfig *CacheConfig, chainConfig *params.ChainConfig, engine consensus.Engine, vmConfig vm.Config, shouldPreserve func(block *types.Block) bool, ref bool, shard, numShard uint64, txBatch bool, pendingCrossTxs map[common.Hash]*types.TxControl, promCrossTxs map[common.Hash]bool, promCrossMu sync.RWMutex, rwLocked map[common.Address]*types.CLock, rwLockedMu sync.RWMutex, refCrossTxs map[uint64][]common.Hash, shardThMap map[uint64]map[uint64][]common.Hash, logdir string) (*BlockChain, error) {
 	if cacheConfig == nil {
 		cacheConfig = &CacheConfig{
 			TrieNodeLimit: 256,
@@ -225,7 +226,6 @@ func NewBlockChain(db ethdb.Database, cacheConfig *CacheConfig, chainConfig *par
 		badBlocks:         badBlocks,
 		privateStateCache: state.NewDatabase(db),
 		pendingCrossTxs:   pendingCrossTxs,
-		crossTxsMu:        crossTxMu,
 		refCrossTxs:       refCrossTxs,
 		promCrossTxs:      promCrossTxs,
 		promCrossMu:       promCrossMu,
@@ -236,6 +236,7 @@ func NewBlockChain(db ethdb.Database, cacheConfig *CacheConfig, chainConfig *par
 		rwLocked:          rwLocked,
 		rwLockedMu:        rwLockedMu,
 		foreignDataCh:     make(chan struct{}),
+		logdir:            logdir,
 	}
 	bc.SetValidator(NewBlockValidator(chainConfig, bc, engine))
 	bc.SetProcessor(NewStateProcessor(chainConfig, bc, engine))
@@ -293,6 +294,21 @@ func (bc *BlockChain) getProcInterrupt() bool {
 // CommitAddress Returns the address of the state commitment transaction
 func (bc *BlockChain) CommitAddress() common.Address {
 	return bc.commitAddress
+}
+
+// CrossTxStatus returns the status of a cross-shard transaction!
+func (bc *BlockChain) CrossTxStatus(hash common.Hash) bool {
+	bc.rwLockedMu.RLock()
+	defer bc.rwLockedMu.RUnlock()
+	return bc.pendingCrossTxs[hash].Status
+}
+
+// Tcb returns the tcb from a hash!
+func (bc *BlockChain) Tcb(hash common.Hash) (*types.TxControl, bool) {
+	bc.rwLockedMu.RLock()
+	defer bc.rwLockedMu.RUnlock()
+	tcb, tok := bc.pendingCrossTxs[hash]
+	return tcb, tok
 }
 
 // CrossCount counts the total number of cross-shard transaction the shard was
@@ -1446,19 +1462,12 @@ func (bc *BlockChain) insertChain(chain types.Blocks) (int, []interface{}, []*ty
 			for _, tx := range block.Transactions() {
 				if tx.TxType() == types.CrossShardLocal {
 					tHash := tx.Hash()
-					bc.crossTxsMu.RLock()
-					tcb := bc.pendingCrossTxs[tHash]
-					bc.crossTxsMu.RUnlock()
-
-					tcb.TxControlMu.RLock()
-					if !tcb.Status {
-						tcb.TxControlMu.RUnlock()
+					if !bc.CrossTxStatus(tHash) {
 						select {
 						case <-bc.foreignDataCh:
 							continue
 						}
 					}
-					tcb.TxControlMu.RUnlock()
 				}
 			}
 		}
@@ -1591,9 +1600,34 @@ func (bc *BlockChain) UpdateShardStatus(block *types.Block, receipts types.Recei
 	var (
 		ccount = 0
 		csl    = 0
+		bNum   = block.NumberU64()
 	)
-	for _, tx := range block.Transactions() {
+	ltdata := bc.logdir + "ltdata"
+	ltdataf, err := os.OpenFile(ltdata, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		log.Error("Can't open ltdata file", "error", err)
+	}
+	defer ltdataf.Close()
+	csltime := bc.logdir + "csltime"
+	csltimef, err := os.OpenFile(csltime, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		log.Error("Can't open csltime  file", "error", err)
+	}
+	defer csltimef.Close()
+	// state commitment time!
+	dectime := bc.logdir + "dectime"
+	dectimef, err := os.OpenFile(dectime, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		log.Error("Can't open dectime file", "error", err)
+	}
+	defer dectimef.Close()
+	// Parsing transactions!
+	txs := block.Transactions()
+	for i, tx := range txs {
 		txType := tx.TxType()
+		receipt := receipts[i]
+		// Tranaction data file
+		fmt.Fprintln(ltdataf, bNum, tx.Hash().Hex(), txType, receipt.Status, receipt.GasUsed, time.Now().Unix())
 		if txType == types.CrossShardLocal {
 			tHash := tx.Hash()
 			tcb := bc.pendingCrossTxs[tHash]
@@ -1615,21 +1649,18 @@ func (bc *BlockChain) UpdateShardStatus(block *types.Block, receipts types.Recei
 			}
 			csl++
 			delete(bc.promCrossTxs, tHash)
+			// Writing to csltimef
+			fmt.Fprintln(csltimef, bNum, tx.Hash().Hex(), time.Now().Unix())
 		} else if txType == types.LocalDecision {
-			_, _, bNum, tHash, _ := types.DecodeDecision(true, tx)
+			shard, tid, tNum, tHash, _ := types.DecodeDecision(true, tx)
 			_, tok := bc.pendingCrossTxs[tHash]
 			if !tok {
 				log.Warn("Transaction control block not found", "hash", tHash)
 				continue
 			}
-			// Adding self decision/commit
-			// commit := &types.TCommit{TxHash: tHash, Shard: bc.myshard, BNum: bNum, StateRoot: croot}
-			// if !bc.TxBatch() {
-			// 	tcb.AddTCommit(commit)
-			// }
 			hashes := []common.Hash{tHash}
 			if bc.TxBatch() {
-				hashes = bc.refCrossTxs[bNum]
+				hashes = bc.refCrossTxs[tNum]
 			}
 			for _, hash := range hashes {
 				tcb := bc.pendingCrossTxs[hash]
@@ -1653,10 +1684,20 @@ func (bc *BlockChain) UpdateShardStatus(block *types.Block, receipts types.Recei
 					}
 				}
 				ccount++
+				fmt.Fprintln(dectimef, bNum, shard, tid, tNum, tx.Hash().Hex(), hash.Hex(), time.Now().Unix())
 			}
 		}
 	}
 	bc.AddCount(ccount)
+	// Logging block information!
+	txLen := len(txs)
+	lbtime := bc.logdir + "lbtime"
+	lbtimef, err := os.OpenFile(lbtime, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		log.Error("Can't open lbtime file", "error", err)
+	}
+	fmt.Fprintln(lbtimef, bNum, txLen, block.Hash().Hex(), block.Root().Hex(), block.GasLimit(), block.GasUsed(), time.Now().Unix())
+	lbtimef.Close()
 	log.Info("Proocessed block", "num", block.NumberU64(), "csl", csl, "dec", ccount)
 }
 
@@ -1665,27 +1706,65 @@ func (bc *BlockChain) UpdateRefStatus(block *types.Block, receipts types.Receipt
 	bc.rwLockedMu.Lock()
 	defer bc.rwLockedMu.Unlock()
 	var (
-		elemSize  = 32
-		u64Offset = 24
-		bNum      = block.NumberU64()
-		receipt   *types.Receipt
-		rStatus   bool
-		tStatus   bool
-		txType    uint64
-		eventOut  uint64
+		u32      = 32
+		u24      = 24
+		bNum     = block.NumberU64()
+		receipt  *types.Receipt
+		rStatus  bool
+		tStatus  bool
+		txType   uint64
+		eventOut uint64
+		txID     uint64
 	)
-	for i, tx := range block.Transactions() {
+	tdata := bc.logdir + "tdata"
+	tdataf, err := os.OpenFile(tdata, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		log.Error("Can't open tdata file", "error", err)
+	}
+	defer tdataf.Close()
+	ctxtime := bc.logdir + "ctxtime"
+	ctxtimef, err := os.OpenFile(ctxtime, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		log.Error("Can't open tdata file", "error", err)
+	}
+	defer ctxtimef.Close()
+	// Transaction status time!
+	txstime := bc.logdir + "txstime"
+	txstimef, err := os.OpenFile(txstime, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		log.Error("Can't open txacktime file", "error", err)
+	}
+	defer txstimef.Close()
+
+	// acknowledgement time!
+	acktime := bc.logdir + "acktime"
+	acktimef, err := os.OpenFile(acktime, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		log.Error("Can't open tdata file", "error", err)
+	}
+	defer acktimef.Close()
+	// Parsing transaction!
+	txs := block.Transactions()
+	for i, tx := range txs {
 		receipt = receipts[i]
 		rStatus = receipt.Status == uint64(1)
 		txType = tx.TxType()
+		// Tranaction data file
+		fmt.Fprintln(tdataf, bNum, tx.Hash().Hex(), txType, rStatus, receipt.GasUsed, time.Now().Unix())
 
 		tStatus = false
 		if rStatus && receipt.Logs != nil {
 			if txType == types.CrossShard || txType == types.Acknowledgement {
-				eventOut = binary.BigEndian.Uint64(receipt.Logs[0].Data[u64Offset:])
+				index := 0
+				eventOut = binary.BigEndian.Uint64(receipt.Logs[0].Data[index+u24 : index+u32])
 				tStatus = eventOut == uint64(1)
+
+				if txType == types.CrossShard {
+					index += u32
+					txID = binary.BigEndian.Uint64(receipt.Logs[0].Data[index+u24 : index+u32])
+				}
 			} else {
-				log.Info("Not a relavent transaction", "status", rStatus, "txType", txType)
+				log.Debug("Not a relavent transaction", "status", rStatus, "txType", txType)
 			}
 		} else {
 			log.Info("Not parsing transaction", "rs", rStatus, "txType", txType, "logs", receipt.Logs)
@@ -1700,15 +1779,16 @@ func (bc *BlockChain) UpdateRefStatus(block *types.Block, receipts types.Receipt
 				_, shards, _ := types.DecodeCrossTx(uint64(0), data)
 				// Updating global locks based on the new cross-shard transaction
 				numShard := len(shards)
-				index := (2+1+numShard)*elemSize + elemSize + 2
+				index := (2+1+numShard)*u32 + u32 + 2
 				allKeys, _, _ := types.GetAllRWSet(uint16(numShard), data[index:])
 				if _, nok := bc.shardThMap[bNum]; !nok {
 					bc.shardThMap[bNum] = make(map[uint64][]common.Hash)
 				}
 				bc.addNewLocks(bNum, tx.Hash(), allKeys)
+				fmt.Fprintln(ctxtimef, bNum, txID, tx.Hash().Hex(), numShard, time.Now().Unix())
 			} else if txType == types.Acknowledgement {
 				// Extracting acknowledgement information
-				shard, _, bNum, tHash := types.DecodeAck(tx)
+				shard, tid, bNum, tHash := types.DecodeAck(tx)
 				shardThs := []common.Hash{tHash}
 				if bc.txBatch {
 					shardThs = bc.shardThMap[bNum][shard]
@@ -1721,9 +1801,25 @@ func (bc *BlockChain) UpdateRefStatus(block *types.Block, receipts types.Receipt
 						}
 					}
 				}
+				log.Info("@pc, ack received!", "shard", shard, "bNum", bNum, "thash", tHash)
+				fmt.Fprintln(acktimef, shard, tid, bNum, tHash.Hex(), tx.Hash().Hex(), time.Now().Unix())
 			}
 		}
+
+		if txType == types.TxnStatus {
+			shard, tid, tNum, tHash, root := types.DecodeDecision(false, tx)
+			fmt.Fprintln(txstimef, bNum, shard, tid, tNum, tHash.Hex(), root.Hex(), time.Now().Unix())
+		}
 	}
+	// Logging block information!
+	txLen := len(txs)
+	rtime := bc.logdir + "rtime"
+	rtimef, err := os.OpenFile(rtime, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		log.Error("Can't open rtime file", "error", err)
+	}
+	fmt.Fprintln(rtimef, bNum, txLen, block.Hash().Hex(), block.Root().Hex(), block.GasLimit(), block.GasUsed(), time.Now().Unix())
+	rtimef.Close()
 }
 
 // DeleteLocks delete locks held by a shard
@@ -1771,12 +1867,44 @@ func (bc *BlockChain) ParseBlock(block *types.Block, receipts types.Receipts) []
 		bc.refCrossTxs[refNum] = []common.Hash{}
 	}
 
-	for i, tx := range block.Transactions() {
+	// Transactional information!
+	tdata := bc.logdir + "tdata"
+	tdataf, err := os.OpenFile(tdata, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		log.Error("Can't open tdata file", "error", err)
+	}
+	defer tdataf.Close()
+	// Cross-shard transaction file
+	ctxtime := bc.logdir + "ctxtime"
+	ctxtimef, err := os.OpenFile(ctxtime, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		log.Error("Can't open tdata file", "error", err)
+	}
+	defer ctxtimef.Close()
+	// Transaction status time!
+	txstime := bc.logdir + "txstime"
+	txstimef, err := os.OpenFile(txstime, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		log.Error("Can't open txacktime file", "error", err)
+	}
+	defer txstimef.Close()
+	// acknowledgement time!
+	acktime := bc.logdir + "acktime"
+	acktimef, err := os.OpenFile(acktime, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		log.Error("Can't open tdata file", "error", err)
+	}
+	defer acktimef.Close()
+
+	// Parsing transaction!
+	txs := block.Transactions()
+	for i, tx := range txs {
 		// Checking execution status of the transaction
 		txType := tx.TxType()
 		receipt := receipts[i]
 		rStatus := receipt.Status == uint64(1)
 		txStatus := false
+		fmt.Fprintln(tdataf, refNum, tx.Hash().Hex(), txType, rStatus, receipt.GasUsed, time.Now().Unix())
 
 		// Procedd if and only if the transaction status is 1
 		if rStatus && receipt.Logs != nil {
@@ -1828,21 +1956,18 @@ func (bc *BlockChain) ParseBlock(block *types.Block, receipts types.Receipts) []
 					// If have not seen a transaction with same hash
 					if _, ok := bc.pendingCrossTxs[ctxHash]; !ok {
 						// Store new transaction contrl for every cross-shard transaction
-						bc.crossTxsMu.Lock()
 						bc.pendingCrossTxs[ctxHash] = types.NewTxControl(refNum, false)
 						bc.pendingCrossTxs[ctxHash].InitTxControl(bc.myshard, txID, crossTx)
-						bc.crossTxsMu.Unlock()
 
 						// A map between block number and transaction hash
 						bc.refCrossTxs[refNum] = append(bc.refCrossTxs[refNum], ctxHash)
 						log.Info("New cross shard transaction added!", "bn", refNum, "shards", shardsInvolved, "th", ctxHash, "len", len(bc.refCrossTxs[refNum]))
 					}
+					fmt.Fprintln(ctxtimef, refNum, txID, tx.Hash().Hex(), numShards, time.Now().Unix())
 				}
 			} else if txType == types.TxnStatus {
-				shard, _, bNum, tHash, root := types.DecodeDecision(false, tx)
-				bc.crossTxsMu.RLock()
+				shard, tid, bNum, tHash, root := types.DecodeDecision(false, tx)
 				tcb, tok := bc.pendingCrossTxs[tHash]
-				bc.crossTxsMu.RUnlock()
 				log.Debug("TxnStatus received for", "thash", tHash, "shard", shard, "root", root, "tok", tok)
 				// Adding commit for the shard!
 				if tok {
@@ -1862,8 +1987,13 @@ func (bc *BlockChain) ParseBlock(block *types.Block, receipts types.Receipts) []
 							promHashes = append(promHashes, tHash)
 						}
 					}
+					fmt.Fprintln(txstimef, refNum, shard, tid, bNum, tHash.Hex(), root.Hex(), time.Now().Unix())
 				}
 			}
+		}
+		if txType == types.Acknowledgement {
+			shard, tid, tNum, tHash := types.DecodeAck(tx)
+			fmt.Fprintln(txstimef, refNum, rStatus, shard, tid, tNum, tHash.Hex(), time.Now().Unix())
 		}
 	}
 	return promHashes
@@ -1888,11 +2018,6 @@ func (bc *BlockChain) AddGCommit(commit *types.TCommit) bool {
 // Commit returns value committed by a shard!
 func (bc *BlockChain) Commit(bNum, shard uint64) common.Hash {
 	return bc.shardCommits[bNum][shard]
-}
-
-// Tcb returns trasnaction control block of a transaction
-func (bc *BlockChain) Tcb(hash common.Hash) *types.TxControl {
-	return bc.pendingCrossTxs[hash]
 }
 
 // RefCrossTxs returns cross shard transaction
@@ -2077,11 +2202,13 @@ func (bc *BlockChain) Ref() bool {
 
 // PostForeignDataEvent posts after downloading foreign data
 func (bc *BlockChain) PostForeignDataEvent(hashes []common.Hash) {
+	bc.promCrossMu.Lock()
 	for _, hash := range hashes {
 		if _, ok := bc.promCrossTxs[hash]; !ok {
 			bc.promCrossTxs[hash] = false
 		}
 	}
+	bc.promCrossMu.Unlock()
 	log.Debug("Foreign data posted for", "len", len(hashes))
 	select {
 	case bc.foreignDataCh <- struct{}{}:
