@@ -70,14 +70,15 @@ func SignTx(tx *Transaction, s Signer, prv *ecdsa.PrivateKey) (*Transaction, err
 // signing method. The cache is invalidated if the cached signer does
 // not match the signer used in the current call.
 func Sender(signer Signer, tx *Transaction) (common.Address, error) {
-	if tx.TxType() == TxnStatus {
+	txType := tx.TxType()
+	if txType == TxnStatus || txType == Acknowledgement {
 		return ShardAddress(tx.Shard()), nil
-	} else if tx.TxType() == ContractInit {
+	} else if txType == ContractInit {
 		return RefAddress(), nil
-	} else if tx.TxType() == CrossShardLocal {
+	} else if txType == CrossShardLocal {
 		addr := tx.From()
 		return addr, nil
-	} else if tx.TxType() == TxnStatus || tx.TxType() == LocalDecision {
+	} else if tx.TxType() == LocalDecision {
 		seed := "c031f6c2e4f00be4bfa6298c5428dc7f7989d1d6"
 		addr := new(big.Int)
 		addr, _ = addr.SetString(seed, 16)
