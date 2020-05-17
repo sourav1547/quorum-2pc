@@ -1565,6 +1565,10 @@ func (bc *BlockChain) insertChain(chain types.Blocks) (int, []interface{}, []*ty
 
 func (bc *BlockChain) addNewLocks(bNum uint64, tHash common.Hash, allKeys map[uint64][]*types.CKeys) {
 	// This function assumes that the bc.rwLockedMu is already held
+	// Initializing thKeys for the transaction!
+	if _, hok := bc.thKeys[tHash]; !hok {
+		bc.thKeys[tHash] = allKeys
+	}
 	var addr common.Address
 	for shard, sKeys := range allKeys {
 		// Marking the transaction for the shard
@@ -1767,7 +1771,7 @@ func (bc *BlockChain) UpdateRefStatus(block *types.Block, receipts types.Receipt
 				log.Debug("Not a relavent transaction", "status", rStatus, "txType", txType)
 			}
 		} else {
-			log.Info("Not parsing transaction", "rs", rStatus, "txType", txType, "logs", receipt.Logs)
+			log.Debug("Not parsing transaction", "rs", rStatus, "txType", txType, "logs", receipt.Logs)
 		}
 
 		if tStatus {
@@ -1795,13 +1799,14 @@ func (bc *BlockChain) UpdateRefStatus(block *types.Block, receipts types.Receipt
 				}
 				for _, hash := range shardThs {
 					lockedAddrs, tok := bc.ThKeys(hash, shard)
-					if tok && len(lockedAddrs) > 0 {
-						for _, ckeys := range lockedAddrs {
-							bc.DeleteLocks(ckeys, hash, shard)
-						}
+					if !tok {
+						continue
+					}
+					for _, ckeys := range lockedAddrs {
+						bc.DeleteLocks(ckeys, hash, shard)
 					}
 				}
-				log.Info("@pc, ack received!", "shard", shard, "bNum", bNum, "thash", tHash)
+				log.Debug("Ack received!", "shard", shard, "bNum", bNum, "thash", tHash)
 				fmt.Fprintln(acktimef, shard, tid, bNum, tHash.Hex(), tx.Hash().Hex(), time.Now().Unix())
 			}
 		}
@@ -1961,7 +1966,7 @@ func (bc *BlockChain) ParseBlock(block *types.Block, receipts types.Receipts) []
 
 						// A map between block number and transaction hash
 						bc.refCrossTxs[refNum] = append(bc.refCrossTxs[refNum], ctxHash)
-						log.Info("New cross shard transaction added!", "bn", refNum, "shards", shardsInvolved, "th", ctxHash, "len", len(bc.refCrossTxs[refNum]))
+						log.Debug("New cross shard transaction added!", "bn", refNum, "shards", shardsInvolved, "th", ctxHash, "len", len(bc.refCrossTxs[refNum]))
 					}
 					fmt.Fprintln(ctxtimef, refNum, txID, tx.Hash().Hex(), numShards, time.Now().Unix())
 				}

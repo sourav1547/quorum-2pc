@@ -798,7 +798,6 @@ func (w *worker) unlockShardKeys(shardTxs map[common.Address]types.Transactions)
 	// It assumes that w.rwLockeMu is already locked
 	for addr, txs := range shardTxs {
 		for _, tx := range txs {
-			log.Info("@stx Unlocking shard keys", "addr", addr, "tt", tx.TxType(), "hash", tx.Hash())
 			if tx.TxType() == types.Acknowledgement {
 				shard, _, bNum, tHash := types.DecodeAck(tx)
 				shardThs := []common.Hash{tHash}
