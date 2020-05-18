@@ -796,7 +796,7 @@ func (w *worker) makeCurrent(parent *types.Block, header *types.Header) error {
 // This function unlocks locked keys if the transaction is an acknowledgemnt
 func (w *worker) unlockShardKeys(shardTxs map[common.Address]types.Transactions) {
 	// It assumes that w.rwLockeMu is already locked
-	for addr, txs := range shardTxs {
+	for _, txs := range shardTxs {
 		for _, tx := range txs {
 			if tx.TxType() == types.Acknowledgement {
 				shard, _, bNum, tHash := types.DecodeAck(tx)
@@ -1640,6 +1640,12 @@ func (w *worker) commitNewWork(interrupt *int32, noempty bool, timestamp int64) 
 	if w.eth.MyShard() == uint64(0) {
 		// Segregating cross-shard transaction and state-trasnaction!
 		shardTxs, crossTxs := make(map[common.Address]types.Transactions), pending
+		// Removing accounts without any transactions!
+		for account, txs := range crossTxs {
+			if len(txs) == 0 {
+				delete(crossTxs, account)
+			}
+		}
 		for _, account := range w.eth.TxPool().Shards() {
 			if txs := crossTxs[account]; len(txs) > 0 {
 				delete(crossTxs, account)
@@ -1659,9 +1665,11 @@ func (w *worker) commitNewWork(interrupt *int32, noempty bool, timestamp int64) 
 		if len(crossTxs) > 0 {
 			// Add new cross-shard transactions!
 			ctxs := w.NewValidCrossTransactions(crossTxs)
-			txs := types.NewTransactionsByPriceAndNonce(w.current.signer, ctxs)
-			if w.commitTransactions(txs, w.coinbase, interrupt) {
-				return
+			if len(ctxs) > 0 {
+				txs := types.NewTransactionsByPriceAndNonce(w.current.signer, ctxs)
+				if w.commitTransactions(txs, w.coinbase, interrupt) {
+					return
+				}
 			}
 		}
 	} else {
@@ -1676,6 +1684,11 @@ func (w *worker) commitNewWork(interrupt *int32, noempty bool, timestamp int64) 
 			if txs := remoteTxs[account]; len(txs) > 0 {
 				delete(remoteTxs, account)
 				localTxs[account] = txs
+			}
+		}
+		for account, txs := range remoteTxs {
+			if len(txs) == 0 {
+				delete(remoteTxs, account)
 			}
 		}
 		if len(localTxs) > 0 {

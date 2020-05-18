@@ -200,11 +200,6 @@ func (tx *Transaction) SetRecipient(to *common.Address) {
 	tx.data.Recipient = to
 }
 
-// SetSender updates the sender of a transaction
-func (tx *Transaction) SetSender(sender *common.Address) {
-	tx.data.Sender = sender
-}
-
 // ChainId returns which chain id this transaction was signed for (if at all)
 func (tx *Transaction) ChainId() *big.Int {
 	return deriveChainId(tx.data.V)

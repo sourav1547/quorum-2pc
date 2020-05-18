@@ -790,10 +790,10 @@ func (pool *TxPool) enqueueTx(hash common.Hash, tx *types.Transaction) (bool, er
 	from, _ := types.Sender(pool.signer, tx) // already validated
 	txType := tx.TxType()
 	if pool.queue[from] == nil {
-		pool.queue[from] = newTxList(true)
+		pool.queue[from] = newTxList(false)
 	}
 	if pool.pending[from] == nil {
-		pool.pending[from] = newTxList(true)
+		pool.pending[from] = newTxList(false)
 	}
 
 	var (
@@ -844,7 +844,7 @@ func (pool *TxPool) journalTx(from common.Address, tx *types.Transaction) {
 func (pool *TxPool) promoteTx(addr common.Address, hash common.Hash, tx *types.Transaction) bool {
 	// Try to insert the transaction into the pending queue
 	if pool.pending[addr] == nil {
-		pool.pending[addr] = newTxList(true)
+		pool.pending[addr] = newTxList(false)
 	}
 	list := pool.pending[addr]
 
