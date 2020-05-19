@@ -223,8 +223,8 @@ func New(ctx *node.ServiceContext, config *Config) (*Ethereum, error) {
 		log.Info("Address created for ", "shard", i, "address", common.BigToAddress(addr))
 	}
 	eth.txBatch = config.TxBatch == uint64(1) // TxBatch==1 indicates batching is enabled
-	eth.logdir = "/Users/sourav/tpc/log/"
-	// eth.logdir = "/mnt/ssd/tpc/log/"
+	// eth.logdir = "/Users/sourav/tpc/log/"
+	eth.logdir = "/home/ubuntu/tpc/"
 
 	// force to set the istanbul etherbase to node key address
 	if chainConfig.Istanbul != nil {
