@@ -267,7 +267,7 @@ func newWorker(config *params.ChainConfig, engine consensus.Engine, eth Backend,
 
 		// Fixing the gas limit for the entire blockchain.
 		worker.gasLimit = core.CalcGasLimit(worker.chain.GetBlockByNumber(uint64(0)), worker.gasFloor, worker.gasCeil)
-		worker.txGasLimit = worker.gasLimit / uint64(100)
+		worker.txGasLimit = uint64(150000)
 		worker.nonce = uint64(0) // Number of cross-shard transaction approved so far
 		worker.batch = worker.chain.TxBatch()
 
@@ -925,35 +925,19 @@ func (w *worker) checkLockStatus(addr common.Address, addrKeys map[common.Hash]b
 	}
 
 	if galok {
-		gLockedKeys := w.rwLocked[addr].Keys
+		if _, ualok := w.cUnlocked[addr]; ualok {
+
+		}
+
+		// gLockedKeys := w.rwLocked[addr].Keys
 		if _, ualok := w.cUnlocked[addr]; ualok {
 			unlockedKeys := w.cUnlocked[addr].Keys
-			for key, kval := range addrKeys {
-				gval, gok := gLockedKeys[key]
-				uval, uok := unlockedKeys[key]
-				if gok {
-					if !uok {
-						if gval < 0 {
-							return true // global write lock and not unlocked
-						}
-						if gval > 0 && kval {
-							return true // global readlock, not unlocked and current write lock
-						}
-					} else {
-						if gval < 0 && uval >= 0 {
-							return true // global write locked and not write unlocked
-						}
-						if gval < uval && kval {
-							return true // number of unlocked is less than number of locked
-						}
-					}
-				}
+			if w.chain.CheckUGLock(addr, unlockedKeys, addrKeys) {
+				return true
 			}
 		} else {
-			for key, kval := range addrKeys {
-				if gval, gok := gLockedKeys[key]; gok && (gval < 0 || kval) {
-					return true // either globally write locked or globally readlocked but not yet unlocked
-				}
+			if w.chain.CheckGLock(addr, addrKeys) {
+				return true
 			}
 		}
 		return false
@@ -1147,7 +1131,7 @@ func (w *worker) commitInitialContract(coinbase common.Address, interrupt *int32
 
 	gasPrice := big.NewInt(0)
 	blkGasLimit := w.current.header.GasLimit
-	gasLimit := blkGasLimit / 100
+	gasLimit := blkGasLimit / 5
 	// To check contract objects
 	for _, contract := range contracts.Contracts {
 

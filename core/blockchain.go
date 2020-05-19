@@ -1705,6 +1705,50 @@ func (bc *BlockChain) UpdateShardStatus(block *types.Block, receipts types.Recei
 	log.Info("Proocessed block", "num", block.NumberU64(), "csl", csl, "dec", ccount)
 }
 
+// CheckUGLock when the address is unlocked!
+func (bc *BlockChain) CheckUGLock(addr common.Address, unlockedKeys map[common.Hash]int, addrKeys map[common.Hash]bool) bool {
+	bc.rwLockedMu.RLock()
+	bc.rwLockedMu.RUnlock()
+
+	gLockedKeys := bc.rwLocked[addr].Keys
+	for key, kval := range addrKeys {
+		gval, gok := gLockedKeys[key]
+		uval, uok := unlockedKeys[key]
+		if gok {
+			if !uok {
+				if gval < 0 {
+					return true // global write lock and not unlocked
+				}
+				if gval > 0 && kval {
+					return true // global readlock, not unlocked and current write lock
+				}
+			} else {
+				if gval < 0 && uval >= 0 {
+					return true // global write locked and not write unlocked
+				}
+				if gval < uval && kval {
+					return true // number of unlocked is less than number of locked
+				}
+			}
+		}
+	}
+	return false
+}
+
+// CheckGLock when the address is not unlocked
+func (bc *BlockChain) CheckGLock(addr common.Address, addrKeys map[common.Hash]bool) bool {
+	bc.rwLockedMu.RLock()
+	bc.rwLockedMu.RUnlock()
+
+	gLockedKeys := bc.rwLocked[addr].Keys
+	for key, kval := range addrKeys {
+		if gval, gok := gLockedKeys[key]; gok && (gval < 0 || kval) {
+			return true // either globally write locked or globally readlocked but not yet unlocked
+		}
+	}
+	return false
+}
+
 // UpdateRefStatus updates current reference statsus
 func (bc *BlockChain) UpdateRefStatus(block *types.Block, receipts types.Receipts) {
 	bc.rwLockedMu.Lock()
