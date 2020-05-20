@@ -132,8 +132,7 @@ type BlockChain struct {
 	procCtxs   map[common.Hash]bool                      // Map of already processed transaction
 	shardThMap map[uint64]map[uint64][]common.Hash       // ref-number: shard::tHash map
 	thKeys     map[common.Hash]map[uint64][]*types.CKeys // address locked by a transaction
-	rwLocked   map[common.Address]*types.CLock
-	rwLockedMu sync.RWMutex
+	gLocked    *types.RWLock
 	logdir     string
 
 	shardCommits map[uint64]map[uint64]common.Hash // commits of all shards involved in cross shard transaction
@@ -188,7 +187,7 @@ type BlockChain struct {
 // NewBlockChain returns a fully initialised block chain using information
 // available in the database. It initialises the default Ethereum Validator and
 // Processor.
-func NewBlockChain(db ethdb.Database, cacheConfig *CacheConfig, chainConfig *params.ChainConfig, engine consensus.Engine, vmConfig vm.Config, shouldPreserve func(block *types.Block) bool, ref bool, shard, numShard uint64, txBatch bool, pendingCrossTxs map[common.Hash]*types.TxControl, promCrossTxs map[common.Hash]bool, promCrossMu sync.RWMutex, rwLocked map[common.Address]*types.CLock, rwLockedMu sync.RWMutex, refCrossTxs map[uint64][]common.Hash, shardThMap map[uint64]map[uint64][]common.Hash, logdir string) (*BlockChain, error) {
+func NewBlockChain(db ethdb.Database, cacheConfig *CacheConfig, chainConfig *params.ChainConfig, engine consensus.Engine, vmConfig vm.Config, shouldPreserve func(block *types.Block) bool, ref bool, shard, numShard uint64, txBatch bool, pendingCrossTxs map[common.Hash]*types.TxControl, promCrossTxs map[common.Hash]bool, promCrossMu sync.RWMutex, gLocked *types.RWLock, refCrossTxs map[uint64][]common.Hash, shardThMap map[uint64]map[uint64][]common.Hash, logdir string) (*BlockChain, error) {
 	if cacheConfig == nil {
 		cacheConfig = &CacheConfig{
 			TrieNodeLimit: 256,
@@ -233,8 +232,7 @@ func NewBlockChain(db ethdb.Database, cacheConfig *CacheConfig, chainConfig *par
 		shardThMap:        shardThMap,
 		shardCommits:      make(map[uint64]map[uint64]common.Hash),
 		thKeys:            make(map[common.Hash]map[uint64][]*types.CKeys),
-		rwLocked:          rwLocked,
-		rwLockedMu:        rwLockedMu,
+		gLocked:           gLocked,
 		foreignDataCh:     make(chan struct{}),
 		logdir:            logdir,
 	}
@@ -298,15 +296,26 @@ func (bc *BlockChain) CommitAddress() common.Address {
 
 // CrossTxStatus returns the status of a cross-shard transaction!
 func (bc *BlockChain) CrossTxStatus(hash common.Hash) bool {
-	bc.rwLockedMu.RLock()
-	defer bc.rwLockedMu.RUnlock()
+	bc.gLocked.Mu.RLock()
+	defer bc.gLocked.Mu.RUnlock()
+	return bc.pendingCrossTxs[hash].Status
+}
+
+// CrossTxStatusLocked returns the status of a cross-shard transaction!
+func (bc *BlockChain) CrossTxStatusLocked(hash common.Hash) bool {
 	return bc.pendingCrossTxs[hash].Status
 }
 
 // Tcb returns the tcb from a hash!
 func (bc *BlockChain) Tcb(hash common.Hash) (*types.TxControl, bool) {
-	bc.rwLockedMu.RLock()
-	defer bc.rwLockedMu.RUnlock()
+	bc.gLocked.Mu.RLock()
+	defer bc.gLocked.Mu.RUnlock()
+	tcb, tok := bc.pendingCrossTxs[hash]
+	return tcb, tok
+}
+
+// TcbLocked returns Tcb without lock!
+func (bc *BlockChain) TcbLocked(hash common.Hash) (*types.TxControl, bool) {
 	tcb, tok := bc.pendingCrossTxs[hash]
 	return tcb, tok
 }
@@ -335,22 +344,22 @@ func (bc *BlockChain) SetCommitAddress(addr common.Address) {
 
 // IsProcessed returns whether a trasnaction is already processed or not!
 func (bc *BlockChain) IsProcessed(thash common.Hash) bool {
-	bc.rwLockedMu.RLock()
-	defer bc.rwLockedMu.RUnlock()
+	bc.gLocked.Mu.RLock()
+	defer bc.gLocked.Mu.RUnlock()
 	_, tok := bc.procCtxs[thash]
 	return tok
 }
 
 // IsProcessedLocked returns whether a trasnaction is already processed or not!
 func (bc *BlockChain) IsProcessedLocked(thash common.Hash) bool {
-	// This function assumes the rwLockedMu is alread held
+	// This function assumes the gLocked.Mu is alread held
 	_, tok := bc.procCtxs[thash]
 	return tok
 }
 
 // AddProcessed a new trasnaction to the processed
 func (bc *BlockChain) AddProcessed(thash common.Hash) {
-	// This method assumes that rwLockedMu is already held
+	// This method assumes that gLocked.Mu is already held
 	bc.procCtxs[thash] = false
 }
 
@@ -1564,7 +1573,7 @@ func (bc *BlockChain) insertChain(chain types.Blocks) (int, []interface{}, []*ty
 }
 
 func (bc *BlockChain) addNewLocks(bNum uint64, tHash common.Hash, allKeys map[uint64][]*types.CKeys) {
-	// This function assumes that the bc.rwLockedMu is already held
+	// This function assumes that the bc.gLocked.Mu is already held
 	// Initializing thKeys for the transaction!
 	if _, hok := bc.thKeys[tHash]; !hok {
 		bc.thKeys[tHash] = allKeys
@@ -1579,19 +1588,19 @@ func (bc *BlockChain) addNewLocks(bNum uint64, tHash common.Hash, allKeys map[ui
 		// for every contract of a shard
 		for _, cKeys := range sKeys {
 			addr = cKeys.Addr
-			if _, aok := bc.rwLocked[addr]; !aok {
-				bc.rwLocked[addr] = types.NewCLock(addr)
+			if _, aok := bc.gLocked.Locks[addr]; !aok {
+				bc.gLocked.Locks[addr] = types.NewCLock(addr)
 			}
 			// Increment counter for read locks
 			for _, key := range cKeys.Keys {
-				if _, kok := bc.rwLocked[addr].Keys[key]; !kok {
-					bc.rwLocked[addr].Keys[key] = 0
+				if _, kok := bc.gLocked.Locks[addr].Keys[key]; !kok {
+					bc.gLocked.Locks[addr].Keys[key] = 0
 				}
-				bc.rwLocked[addr].Keys[key] = bc.rwLocked[addr].Keys[key] + 1
+				bc.gLocked.Locks[addr].Keys[key] = bc.gLocked.Locks[addr].Keys[key] + 1
 			}
 			// Mark write locks as -1
 			for _, key := range cKeys.WKeys {
-				bc.rwLocked[addr].Keys[key] = -1
+				bc.gLocked.Locks[addr].Keys[key] = -1
 			}
 		}
 	}
@@ -1599,8 +1608,8 @@ func (bc *BlockChain) addNewLocks(bNum uint64, tHash common.Hash, allKeys map[ui
 
 // UpdateShardStatus handles local decision and cross-shard local
 func (bc *BlockChain) UpdateShardStatus(block *types.Block, receipts types.Receipts) {
-	bc.rwLockedMu.Lock()
-	defer bc.rwLockedMu.Unlock()
+	bc.gLocked.Mu.Lock()
+	defer bc.gLocked.Mu.Unlock()
 	var (
 		ccount = 0
 		csl    = 0
@@ -1638,16 +1647,16 @@ func (bc *BlockChain) UpdateShardStatus(block *types.Block, receipts types.Recei
 			keyval := tcb.Keyval
 			for addr, cKeys := range keyval {
 				if tcb.AddrToShard[addr] == bc.myshard {
-					if _, aok := bc.rwLocked[addr]; !aok {
-						bc.rwLocked[addr] = types.NewCLock(addr)
+					if _, aok := bc.gLocked.Locks[addr]; !aok {
+						bc.gLocked.Locks[addr] = types.NewCLock(addr)
 					}
 					// Unlock the read keys
 					for _, key := range cKeys.Keys {
-						bc.rwLocked[addr].Keys[key] = bc.rwLocked[addr].Keys[key] - 1
+						bc.gLocked.Locks[addr].Keys[key] = bc.gLocked.Locks[addr].Keys[key] - 1
 					}
 					// Unlock write keys
 					for _, key := range cKeys.WKeys {
-						bc.rwLocked[addr].Keys[key] = 0
+						bc.gLocked.Locks[addr].Keys[key] = 0
 					}
 				}
 			}
@@ -1671,19 +1680,19 @@ func (bc *BlockChain) UpdateShardStatus(block *types.Block, receipts types.Recei
 				keyval := tcb.Keyval
 				for addr, cKeys := range keyval {
 					if tcb.AddrToShard[addr] == bc.myshard {
-						if _, aok := bc.rwLocked[addr]; !aok {
-							bc.rwLocked[addr] = types.NewCLock(addr)
+						if _, aok := bc.gLocked.Locks[addr]; !aok {
+							bc.gLocked.Locks[addr] = types.NewCLock(addr)
 						}
 						// Updated read lock status
 						for _, key := range cKeys.Keys {
-							if _, kok := bc.rwLocked[addr].Keys[key]; !kok {
-								bc.rwLocked[addr].Keys[key] = 0
+							if _, kok := bc.gLocked.Locks[addr].Keys[key]; !kok {
+								bc.gLocked.Locks[addr].Keys[key] = 0
 							}
-							bc.rwLocked[addr].Keys[key] = bc.rwLocked[addr].Keys[key] + 1
+							bc.gLocked.Locks[addr].Keys[key] = bc.gLocked.Locks[addr].Keys[key] + 1
 						}
 						// Updating write lock status
 						for _, key := range cKeys.WKeys {
-							bc.rwLocked[addr].Keys[key] = -1
+							bc.gLocked.Locks[addr].Keys[key] = -1
 						}
 					}
 				}
@@ -1707,10 +1716,7 @@ func (bc *BlockChain) UpdateShardStatus(block *types.Block, receipts types.Recei
 
 // CheckUGLock when the address is unlocked!
 func (bc *BlockChain) CheckUGLock(addr common.Address, unlockedKeys map[common.Hash]int, addrKeys map[common.Hash]bool) bool {
-	bc.rwLockedMu.RLock()
-	bc.rwLockedMu.RUnlock()
-
-	gLockedKeys := bc.rwLocked[addr].Keys
+	gLockedKeys := bc.gLocked.Locks[addr].Keys
 	for key, kval := range addrKeys {
 		gval, gok := gLockedKeys[key]
 		uval, uok := unlockedKeys[key]
@@ -1737,10 +1743,7 @@ func (bc *BlockChain) CheckUGLock(addr common.Address, unlockedKeys map[common.H
 
 // CheckGLock when the address is not unlocked
 func (bc *BlockChain) CheckGLock(addr common.Address, addrKeys map[common.Hash]bool) bool {
-	bc.rwLockedMu.RLock()
-	bc.rwLockedMu.RUnlock()
-
-	gLockedKeys := bc.rwLocked[addr].Keys
+	gLockedKeys := bc.gLocked.Locks[addr].Keys
 	for key, kval := range addrKeys {
 		if gval, gok := gLockedKeys[key]; gok && (gval < 0 || kval) {
 			return true // either globally write locked or globally readlocked but not yet unlocked
@@ -1751,8 +1754,8 @@ func (bc *BlockChain) CheckGLock(addr common.Address, addrKeys map[common.Hash]b
 
 // UpdateRefStatus updates current reference statsus
 func (bc *BlockChain) UpdateRefStatus(block *types.Block, receipts types.Receipts) {
-	bc.rwLockedMu.Lock()
-	defer bc.rwLockedMu.Unlock()
+	bc.gLocked.Mu.Lock()
+	defer bc.gLocked.Mu.Unlock()
 	var (
 		u32      = 32
 		u24      = 24
@@ -1876,18 +1879,18 @@ func (bc *BlockChain) DeleteLocks(ckeys *types.CKeys, thash common.Hash, shard u
 	addr := ckeys.Addr
 	// Decrement the read locks
 	for _, key := range ckeys.Keys {
-		bc.rwLocked[addr].Keys[key] = bc.rwLocked[addr].Keys[key] - 1
-		if bc.rwLocked[addr].Keys[key] == 0 {
-			delete(bc.rwLocked[addr].Keys, key)
+		bc.gLocked.Locks[addr].Keys[key] = bc.gLocked.Locks[addr].Keys[key] - 1
+		if bc.gLocked.Locks[addr].Keys[key] == 0 {
+			delete(bc.gLocked.Locks[addr].Keys, key)
 		}
 	}
 	// Remove write locks
 	for _, key := range ckeys.WKeys {
-		delete(bc.rwLocked[addr].Keys, key)
+		delete(bc.gLocked.Locks[addr].Keys, key)
 	}
 	// If everything is clear than delete address
-	if len(bc.rwLocked[addr].Keys) == 0 {
-		delete(bc.rwLocked, addr)
+	if len(bc.gLocked.Locks[addr].Keys) == 0 {
+		delete(bc.gLocked.Locks, addr)
 	}
 	// Remove shard related information!
 	delete(bc.thKeys[thash], shard)
@@ -1899,8 +1902,8 @@ func (bc *BlockChain) DeleteLocks(ckeys *types.CKeys, thash common.Hash, shard u
 
 // ParseBlock function extracts necessary information from a reference block
 func (bc *BlockChain) ParseBlock(block *types.Block, receipts types.Receipts) []common.Hash {
-	bc.rwLockedMu.Lock()
-	defer bc.rwLockedMu.Unlock()
+	bc.gLocked.Mu.Lock()
+	defer bc.gLocked.Mu.Unlock()
 	var (
 		u32         = 32
 		u24         = 24

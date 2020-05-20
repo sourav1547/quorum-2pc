@@ -80,9 +80,8 @@ type Ethereum struct {
 	refCrossTxs map[uint64][]common.Hash
 	shardThMap  map[uint64]map[uint64][]common.Hash
 
-	rwLocked   map[common.Address]*types.CLock // Counter of currently locked keys
-	rwLockedMu sync.RWMutex
-	logdir     string
+	gLocked *types.RWLock
+	logdir  string
 
 	// Handlers
 	txPool          *core.TxPool
@@ -203,7 +202,7 @@ func New(ctx *node.ServiceContext, config *Config) (*Ethereum, error) {
 		shardAddMap:     make(map[uint64]*big.Int),
 		shardThMap:      make(map[uint64]map[uint64][]common.Hash),
 		pendingCrossTxs: make(map[common.Hash]*types.TxControl),
-		rwLocked:        make(map[common.Address]*types.CLock),
+		gLocked:         types.NewRWLock(),
 		refCrossTxs:     make(map[uint64][]common.Hash),
 		promCrossTxs:    make(map[common.Hash]bool),
 	}
@@ -248,8 +247,8 @@ func New(ctx *node.ServiceContext, config *Config) (*Ethereum, error) {
 		}
 		cacheConfig = &core.CacheConfig{Disabled: config.NoPruning, TrieNodeLimit: config.TrieCache, TrieTimeLimit: config.TrieTimeout}
 	)
-	eth.blockchain, err = core.NewBlockChain(chainDb, cacheConfig, eth.chainConfig, eth.engine, vmConfig, eth.shouldPreserve, false, config.MyShard, config.NumShard, eth.txBatch, eth.pendingCrossTxs, eth.promCrossTxs, eth.promCrossMu, eth.rwLocked, eth.rwLockedMu, eth.refCrossTxs, eth.shardThMap, eth.logdir)
-	eth.refchain, rerr = core.NewBlockChain(refDb, cacheConfig, eth.chainConfig, eth.engine, vmConfig, eth.shouldPreserve, true, config.MyShard, config.NumShard, eth.txBatch, eth.pendingCrossTxs, eth.promCrossTxs, eth.promCrossMu, eth.rwLocked, eth.rwLockedMu, eth.refCrossTxs, eth.shardThMap, eth.logdir)
+	eth.blockchain, err = core.NewBlockChain(chainDb, cacheConfig, eth.chainConfig, eth.engine, vmConfig, eth.shouldPreserve, false, config.MyShard, config.NumShard, eth.txBatch, eth.pendingCrossTxs, eth.promCrossTxs, eth.promCrossMu, eth.gLocked, eth.refCrossTxs, eth.shardThMap, eth.logdir)
+	eth.refchain, rerr = core.NewBlockChain(refDb, cacheConfig, eth.chainConfig, eth.engine, vmConfig, eth.shouldPreserve, true, config.MyShard, config.NumShard, eth.txBatch, eth.pendingCrossTxs, eth.promCrossTxs, eth.promCrossMu, eth.gLocked, eth.refCrossTxs, eth.shardThMap, eth.logdir)
 	if err != nil {
 		return nil, err
 	}
@@ -271,7 +270,7 @@ func New(ctx *node.ServiceContext, config *Config) (*Ethereum, error) {
 		return nil, err
 	}
 
-	eth.miner = miner.New(eth, eth.chainConfig, eth.EventMux(), eth.engine, config.MinerRecommit, config.MinerGasFloor, config.MinerGasCeil, eth.isLocalBlock, eth.promCrossTxs, eth.promCrossMu, eth.rwLocked, eth.rwLockedMu, eth.logdir)
+	eth.miner = miner.New(eth, eth.chainConfig, eth.EventMux(), eth.engine, config.MinerRecommit, config.MinerGasFloor, config.MinerGasCeil, eth.isLocalBlock, eth.promCrossTxs, eth.promCrossMu, eth.gLocked, eth.logdir)
 	eth.miner.SetExtra(makeExtraData(config.MinerExtraData, eth.chainConfig.IsQuorum))
 
 	hexNodeId := fmt.Sprintf("%x", crypto.FromECDSAPub(&ctx.NodeKey().PublicKey)[1:]) // Quorum

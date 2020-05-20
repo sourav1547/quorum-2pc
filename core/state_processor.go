@@ -88,7 +88,7 @@ func (p *StateProcessor) Process(block *types.Block, statedb, privateState *stat
 			tcb = nil
 		}
 
-		receipt, privateReceipt, _, err := ApplyTransaction(p.config, p.bc, nil, gp, tcb, p.bc.rwLocked, nil, statedb, privateState, header, tx, usedGas, cfg)
+		receipt, privateReceipt, _, err := ApplyTransaction(p.config, p.bc, nil, gp, tcb, p.bc.gLocked, nil, statedb, privateState, header, tx, usedGas, cfg)
 
 		if tx.TxType() == types.CrossShardLocal && err != nil {
 			statedb.RevertToSnapshot(snap)
@@ -128,7 +128,7 @@ func (p *StateProcessor) Process(block *types.Block, statedb, privateState *stat
 // and uses the input parameters for its environment. It returns the receipt
 // for the transaction, gas used and an error if the transaction failed,
 // indicating the block was invalid.
-func ApplyTransaction(config *params.ChainConfig, bc *BlockChain, author *common.Address, gp *GasPool, tcb *types.TxControl, gLockedAddr, cUnlockedAddr map[common.Address]*types.CLock, statedb, privateState *state.StateDB, header *types.Header, tx *types.Transaction, usedGas *uint64, cfg vm.Config) (*types.Receipt, *types.Receipt, uint64, error) {
+func ApplyTransaction(config *params.ChainConfig, bc *BlockChain, author *common.Address, gp *GasPool, tcb *types.TxControl, gLocked, cUnlocked *types.RWLock, statedb, privateState *state.StateDB, header *types.Header, tx *types.Transaction, usedGas *uint64, cfg vm.Config) (*types.Receipt, *types.Receipt, uint64, error) {
 	if !config.IsQuorum || !tx.IsPrivate() {
 		privateState = statedb
 	}
@@ -150,7 +150,7 @@ func ApplyTransaction(config *params.ChainConfig, bc *BlockChain, author *common
 	context := NewEVMContext(msg, header, bc, author)
 	// Create a new environment which holds all relevant information
 	// about the transaction and calling mechanisms.
-	vmenv := vm.NewEVM(context, tcb, gLockedAddr, cUnlockedAddr, statedb, privateState, config, cfg)
+	vmenv := vm.NewEVM(context, tcb, gLocked, cUnlocked, statedb, privateState, config, cfg)
 
 	// Apply the transaction to the current state (included in the env)
 	_, gas, failed, err := ApplyMessage(vmenv, msg, gp)
