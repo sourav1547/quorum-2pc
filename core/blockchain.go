@@ -2048,6 +2048,15 @@ func (bc *BlockChain) ParseBlock(block *types.Block, receipts types.Receipts) []
 			fmt.Fprintln(txstimef, refNum, rStatus, shard, tid, tNum, tHash.Hex(), time.Now().Unix())
 		}
 	}
+	// Logging block information!
+	txLen := len(txs)
+	rtime := bc.logdir + "rtime"
+	rtimef, err := os.OpenFile(rtime, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		log.Error("Can't open rtime file", "error", err)
+	}
+	fmt.Fprintln(rtimef, refNum, txLen, block.Hash().Hex(), block.Root().Hex(), block.GasLimit(), block.GasUsed(), time.Now().Unix())
+	rtimef.Close()
 	return promHashes
 }
 
