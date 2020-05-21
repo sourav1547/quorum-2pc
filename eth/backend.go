@@ -73,8 +73,7 @@ type Ethereum struct {
 	// Channel for shutting down the service
 	shutdownChan chan bool // Channel for shutting down the Ethereum
 
-	promCrossTxs    map[common.Hash]bool //Promoted Transactions
-	promCrossMu     sync.RWMutex
+	promCrossTxs    map[common.Hash]bool             //Promoted Transactions
 	pendingCrossTxs map[common.Hash]*types.TxControl // Pending Cross shard transactions
 
 	refCrossTxs map[uint64][]common.Hash
@@ -247,8 +246,8 @@ func New(ctx *node.ServiceContext, config *Config) (*Ethereum, error) {
 		}
 		cacheConfig = &core.CacheConfig{Disabled: config.NoPruning, TrieNodeLimit: config.TrieCache, TrieTimeLimit: config.TrieTimeout}
 	)
-	eth.blockchain, err = core.NewBlockChain(chainDb, cacheConfig, eth.chainConfig, eth.engine, vmConfig, eth.shouldPreserve, false, config.MyShard, config.NumShard, eth.txBatch, eth.pendingCrossTxs, eth.promCrossTxs, eth.promCrossMu, eth.gLocked, eth.refCrossTxs, eth.shardThMap, eth.logdir)
-	eth.refchain, rerr = core.NewBlockChain(refDb, cacheConfig, eth.chainConfig, eth.engine, vmConfig, eth.shouldPreserve, true, config.MyShard, config.NumShard, eth.txBatch, eth.pendingCrossTxs, eth.promCrossTxs, eth.promCrossMu, eth.gLocked, eth.refCrossTxs, eth.shardThMap, eth.logdir)
+	eth.blockchain, err = core.NewBlockChain(chainDb, cacheConfig, eth.chainConfig, eth.engine, vmConfig, eth.shouldPreserve, false, config.MyShard, config.NumShard, eth.txBatch, eth.pendingCrossTxs, eth.promCrossTxs, eth.gLocked, eth.refCrossTxs, eth.shardThMap, eth.logdir)
+	eth.refchain, rerr = core.NewBlockChain(refDb, cacheConfig, eth.chainConfig, eth.engine, vmConfig, eth.shouldPreserve, true, config.MyShard, config.NumShard, eth.txBatch, eth.pendingCrossTxs, eth.promCrossTxs, eth.gLocked, eth.refCrossTxs, eth.shardThMap, eth.logdir)
 	if err != nil {
 		return nil, err
 	}
@@ -270,7 +269,7 @@ func New(ctx *node.ServiceContext, config *Config) (*Ethereum, error) {
 		return nil, err
 	}
 
-	eth.miner = miner.New(eth, eth.chainConfig, eth.EventMux(), eth.engine, config.MinerRecommit, config.MinerGasFloor, config.MinerGasCeil, eth.isLocalBlock, eth.promCrossTxs, eth.promCrossMu, eth.gLocked, eth.logdir)
+	eth.miner = miner.New(eth, eth.chainConfig, eth.EventMux(), eth.engine, config.MinerRecommit, config.MinerGasFloor, config.MinerGasCeil, eth.isLocalBlock, eth.gLocked, eth.logdir)
 	eth.miner.SetExtra(makeExtraData(config.MinerExtraData, eth.chainConfig.IsQuorum))
 
 	hexNodeId := fmt.Sprintf("%x", crypto.FromECDSAPub(&ctx.NodeKey().PublicKey)[1:]) // Quorum

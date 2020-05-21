@@ -151,9 +151,6 @@ type worker struct {
 	cLocked       *types.RWLock // Currently locked keys
 	logdir        string
 
-	promCrossTxs map[common.Hash]bool
-	promCrossMu  sync.RWMutex
-
 	crossWorkCh     chan struct{}
 	pendingResultCh chan struct{}
 	stopProcessCh   chan struct{}
@@ -218,7 +215,7 @@ type worker struct {
 	resubmitHook func(time.Duration, time.Duration) // Method to call upon updating resubmitting interval.
 }
 
-func newWorker(config *params.ChainConfig, engine consensus.Engine, eth Backend, mux *event.TypeMux, recommit time.Duration, gasFloor, gasCeil uint64, isLocalBlock func(*types.Block) bool, promCrossTxs map[common.Hash]bool, promCrossMu sync.RWMutex, gLocked *types.RWLock, logdir string) *worker {
+func newWorker(config *params.ChainConfig, engine consensus.Engine, eth Backend, mux *event.TypeMux, recommit time.Duration, gasFloor, gasCeil uint64, isLocalBlock func(*types.Block) bool, gLocked *types.RWLock, logdir string) *worker {
 	worker := &worker{
 		config:             config,
 		engine:             engine,
@@ -251,8 +248,6 @@ func newWorker(config *params.ChainConfig, engine consensus.Engine, eth Backend,
 		crossWorkCh:        make(chan struct{}),
 		pendingResultCh:    make(chan struct{}),
 		stopProcessCh:      make(chan struct{}),
-		promCrossTxs:       promCrossTxs,
-		processingMu:       promCrossMu,
 	}
 
 	if _, ok := engine.(consensus.Istanbul); ok || !config.IsQuorum || config.Clique != nil {
@@ -1011,19 +1006,6 @@ func (w *worker) updateShardLockStatus(hash common.Hash) {
 	}
 }
 
-func (w *worker) getPromotedTransactions() []common.Hash {
-	var pTxs []common.Hash
-	if len(w.promCrossTxs) > 0 {
-		for th := range w.promCrossTxs {
-			if w.chain.CrossTxStatusLocked(th) {
-				pTxs = append(pTxs, th)
-			}
-		}
-	}
-	log.Info("Returning promoted transactions", "len", len(pTxs))
-	return pTxs
-}
-
 // commitUncle adds the given block to uncle block set, returns error if failed to add.
 func (w *worker) commitUncle(env *environment, uncle *types.Header) error {
 	hash := uncle.Hash()
@@ -1356,7 +1338,7 @@ func (w *worker) commitNewTransactions(tHashes []common.Hash, coinbase common.Ad
 			log.Warn("Not enough gas for further cross-shard transactions", "have", w.current.gasPool, "want", params.TxGas)
 			break
 		}
-		log.Debug("Posting local decision", "th", tHash, "sth", statusTx.Hash(), "to", w.chain.CommitAddress(), "data", hex.EncodeToString(data))
+		log.Debug("Local decision", "th", tHash, "nonce", ccount, "rnum", tcb.RefNum, "to", w.chain.CommitAddress())
 
 		w.current.state.Prepare(statusTx.Hash(), common.Hash{}, w.current.tcount)
 		w.current.privateState.Prepare(statusTx.Hash(), common.Hash{}, w.current.tcount)
@@ -1658,7 +1640,7 @@ func (w *worker) commitNewWork(interrupt *int32, noempty bool, timestamp int64) 
 			}
 		}
 	} else {
-		pTxs := w.getPromotedTransactions()
+		pTxs := w.chain.GetPromotedTransactions()
 		if w.commitCrossTransactions(pTxs, w.coinbase, interrupt) {
 			w.gLocked.Mu.RUnlock()
 			return

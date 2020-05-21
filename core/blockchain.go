@@ -127,7 +127,6 @@ type BlockChain struct {
 	pendingCrossTxs map[common.Hash]*types.TxControl // Pending Cross shard transactions
 	refCrossTxs     map[uint64][]common.Hash
 	promCrossTxs    map[common.Hash]bool
-	promCrossMu     sync.RWMutex
 
 	procCtxs   map[common.Hash]bool                      // Map of already processed transaction
 	shardThMap map[uint64]map[uint64][]common.Hash       // ref-number: shard::tHash map
@@ -187,7 +186,7 @@ type BlockChain struct {
 // NewBlockChain returns a fully initialised block chain using information
 // available in the database. It initialises the default Ethereum Validator and
 // Processor.
-func NewBlockChain(db ethdb.Database, cacheConfig *CacheConfig, chainConfig *params.ChainConfig, engine consensus.Engine, vmConfig vm.Config, shouldPreserve func(block *types.Block) bool, ref bool, shard, numShard uint64, txBatch bool, pendingCrossTxs map[common.Hash]*types.TxControl, promCrossTxs map[common.Hash]bool, promCrossMu sync.RWMutex, gLocked *types.RWLock, refCrossTxs map[uint64][]common.Hash, shardThMap map[uint64]map[uint64][]common.Hash, logdir string) (*BlockChain, error) {
+func NewBlockChain(db ethdb.Database, cacheConfig *CacheConfig, chainConfig *params.ChainConfig, engine consensus.Engine, vmConfig vm.Config, shouldPreserve func(block *types.Block) bool, ref bool, shard, numShard uint64, txBatch bool, pendingCrossTxs map[common.Hash]*types.TxControl, promCrossTxs map[common.Hash]bool, gLocked *types.RWLock, refCrossTxs map[uint64][]common.Hash, shardThMap map[uint64]map[uint64][]common.Hash, logdir string) (*BlockChain, error) {
 	if cacheConfig == nil {
 		cacheConfig = &CacheConfig{
 			TrieNodeLimit: 256,
@@ -227,7 +226,6 @@ func NewBlockChain(db ethdb.Database, cacheConfig *CacheConfig, chainConfig *par
 		pendingCrossTxs:   pendingCrossTxs,
 		refCrossTxs:       refCrossTxs,
 		promCrossTxs:      promCrossTxs,
-		promCrossMu:       promCrossMu,
 		procCtxs:          make(map[common.Hash]bool),
 		shardThMap:        shardThMap,
 		shardCommits:      make(map[uint64]map[uint64]common.Hash),
@@ -298,11 +296,6 @@ func (bc *BlockChain) CommitAddress() common.Address {
 func (bc *BlockChain) CrossTxStatus(hash common.Hash) bool {
 	bc.gLocked.Mu.RLock()
 	defer bc.gLocked.Mu.RUnlock()
-	return bc.pendingCrossTxs[hash].Status
-}
-
-// CrossTxStatusLocked returns the status of a cross-shard transaction!
-func (bc *BlockChain) CrossTxStatusLocked(hash common.Hash) bool {
 	return bc.pendingCrossTxs[hash].Status
 }
 
@@ -1613,6 +1606,7 @@ func (bc *BlockChain) UpdateShardStatus(block *types.Block, receipts types.Recei
 	var (
 		ccount = 0
 		csl    = 0
+		dec    = 0
 		bNum   = block.NumberU64()
 	)
 	ltdata := bc.logdir + "ltdata"
@@ -1699,6 +1693,7 @@ func (bc *BlockChain) UpdateShardStatus(block *types.Block, receipts types.Recei
 				ccount++
 				fmt.Fprintln(dectimef, bNum, shard, tid, tNum, tx.Hash().Hex(), hash.Hex(), time.Now().Unix())
 			}
+			dec++
 		}
 	}
 	bc.AddCount(ccount)
@@ -1711,7 +1706,7 @@ func (bc *BlockChain) UpdateShardStatus(block *types.Block, receipts types.Recei
 	}
 	fmt.Fprintln(lbtimef, bNum, txLen, block.Hash().Hex(), block.Root().Hex(), block.GasLimit(), block.GasUsed(), time.Now().Unix())
 	lbtimef.Close()
-	log.Info("Proocessed block", "num", block.NumberU64(), "csl", csl, "dec", ccount)
+	log.Info("Proocessed block", "num", block.NumberU64(), "csl", csl, "dec", dec, "tcount", ccount)
 }
 
 // CheckUGLock when the address is unlocked!
@@ -2015,31 +2010,34 @@ func (bc *BlockChain) ParseBlock(block *types.Block, receipts types.Receipts) []
 						bc.refCrossTxs[refNum] = append(bc.refCrossTxs[refNum], ctxHash)
 						log.Debug("New cross shard transaction added!", "bn", refNum, "shards", shardsInvolved, "th", ctxHash, "len", len(bc.refCrossTxs[refNum]))
 					}
-					fmt.Fprintln(ctxtimef, refNum, txID, tx.Hash().Hex(), numShards, time.Now().Unix())
+					fmt.Fprintln(ctxtimef, refNum, txID, tx.Hash().Hex(), ctxHash, numShards, time.Now().Unix())
 				}
 			} else if txType == types.TxnStatus {
-				shard, tid, bNum, tHash, root := types.DecodeDecision(false, tx)
-				tcb, tok := bc.pendingCrossTxs[tHash]
-				log.Debug("TxnStatus received for", "thash", tHash, "shard", shard, "root", root, "tok", tok)
-				// Adding commit for the shard!
-				if tok {
-					commit := &types.TCommit{TxHash: tHash, Shard: shard, BNum: bNum, StateRoot: root}
-					// If all associated shard reply with commit message, promote the
-					// transaction for execution.
-					if bc.TxBatch() {
-						if shard != bc.myshard && bc.AddGCommit(commit) {
-							log.Debug("Ready for data Download!", "thash", tHash)
-							promHashes = append(promHashes, tHash)
-						}
-					} else {
-						if shard == bc.myshard {
-							continue
-						}
+				// bNum is the block number that includes the cross-shard transaciton!
+				shard, tid, tNum, ctxHash, root := types.DecodeDecision(false, tx)
+				log.Debug("TxnStatus received", "hash", ctxHash, "shard", shard, "root", root, "tn", tNum, "rn", refNum)
+				// Writing to file!
+				fmt.Fprintln(txstimef, refNum, shard, tid, tNum, ctxHash.Hex(), root.Hex(), time.Now().Unix())
+				// Don't do anything on trasnaction status from own shard
+				if bc.myshard == shard {
+					continue
+				}
+				// Creating commit from the shard.
+				commit := &types.TCommit{TxHash: ctxHash, Shard: shard, BNum: tNum, StateRoot: root}
+				if bc.TxBatch() {
+					// If batching is enabled, try to add the commit, on successful addition
+					// promote appropriate block!
+					if bc.AddGCommit(commit) {
+						promHashes = append(promHashes, ctxHash)
+					}
+				} else {
+					// If batching is not enabled, try to add individual commit and promote
+					// accordingly!
+					if tcb, tok := bc.pendingCrossTxs[ctxHash]; tok {
 						if tcb.AddTCommit(commit) {
-							promHashes = append(promHashes, tHash)
+							promHashes = append(promHashes, ctxHash)
 						}
 					}
-					fmt.Fprintln(txstimef, refNum, shard, tid, bNum, tHash.Hex(), root.Hex(), time.Now().Unix())
 				}
 			}
 		}
@@ -2064,9 +2062,16 @@ func (bc *BlockChain) ParseBlock(block *types.Block, receipts types.Receipts) []
 func (bc *BlockChain) AddGCommit(commit *types.TCommit) bool {
 	shard := commit.Shard
 	bNum := commit.BNum
+	// Shard is not involved in any relavent cross-shard transaction
+	if _, cok := bc.shardCommits[bNum][shard]; !cok {
+		return false
+	}
+	// Already received an commit from the shard!
 	if (bc.shardCommits[bNum][shard] != common.Hash{}) {
 		return false
 	}
+	// Fresh commit, add commit and if all commits have been
+	// added, promote shard!
 	bc.shardCommits[bNum][shard] = commit.StateRoot
 	for _, root := range bc.shardCommits[bNum] {
 		if (root == common.Hash{}) {
@@ -2263,18 +2268,33 @@ func (bc *BlockChain) Ref() bool {
 
 // PostForeignDataEvent posts after downloading foreign data
 func (bc *BlockChain) PostForeignDataEvent(hashes []common.Hash) {
-	bc.promCrossMu.Lock()
+	bc.gLocked.Mu.Lock()
+	// Add all the promoted hash to bc.promCrossTxs for execution!
 	for _, hash := range hashes {
 		if _, ok := bc.promCrossTxs[hash]; !ok {
 			bc.promCrossTxs[hash] = false
 		}
 	}
-	bc.promCrossMu.Unlock()
+	bc.gLocked.Mu.Unlock()
 	log.Debug("Foreign data posted for", "len", len(hashes))
 	select {
 	case bc.foreignDataCh <- struct{}{}:
 	default:
 	}
+}
+
+// GetPromotedTransactions Return Promoted Transactions!
+func (bc *BlockChain) GetPromotedTransactions() []common.Hash {
+	var pTxs []common.Hash
+	if len(bc.promCrossTxs) > 0 {
+		for thash := range bc.promCrossTxs {
+			if bc.pendingCrossTxs[thash].Status {
+				pTxs = append(pTxs, thash)
+			}
+		}
+	}
+	log.Info("Returning promoted transactions", "len", len(pTxs))
+	return pTxs
 }
 
 // PostChainEvents iterates over the events generated by a chain insertion and
