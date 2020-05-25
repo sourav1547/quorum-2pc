@@ -323,13 +323,13 @@ func (p *peer) AsyncSendNewBlock(ref bool, block *types.Block, td *big.Int) {
 }
 
 // SendDataRequest sends a data request to remote peer
-func (p *peer) SendDataRequest(tHash common.Hash, count uint64, root common.Hash, keys []*types.CKeys) error {
-	return p2p.Send(p.rw, GetStateDataMsg, &getStateData{Root: root, TxHash: tHash, Count: count, Keys: keys})
+func (p *peer) SendDataRequest(refNum uint64, tHash common.Hash, count uint64, root common.Hash, keys []*types.CKeys) error {
+	return p2p.Send(p.rw, GetStateDataMsg, &getStateData{RNum: refNum, Root: root, TxHash: tHash, Count: count, Keys: keys})
 }
 
 // SendDataResponse sends data
-func (p *peer) SendDataResponse(tHash common.Hash, count uint64, root common.Hash, vals []*types.KeyVal) error {
-	return p2p.Send(p.rw, StateDataMsg, &stateData{Root: root, TxHash: tHash, Count: count, Vals: vals})
+func (p *peer) SendDataResponse(tNum uint64, tHash common.Hash, count uint64, root common.Hash, vals []*types.KeyVal) error {
+	return p2p.Send(p.rw, StateDataMsg, &stateData{RNum: tNum, Root: root, TxHash: tHash, Count: count, Vals: vals})
 }
 
 // SendBlockHeaders sends a batch of block headers to the remote peer.

@@ -1332,7 +1332,7 @@ func (bc *BlockChain) insertChain(chain types.Blocks) (int, []interface{}, []*ty
 		events        = make([]interface{}, 0, len(chain))
 		lastCanon     *types.Block
 		coalescedLogs []*types.Log
-		promHashes    []common.Hash
+		promHashes    = make(map[uint64][]common.Hash)
 	)
 	// Start the parallel header verifier
 	headers := make([]*types.Header, len(chain))
@@ -1535,8 +1535,10 @@ func (bc *BlockChain) insertChain(chain types.Blocks) (int, []interface{}, []*ty
 				bc.UpdateRefStatus(block, receipts)
 			} else {
 				if bc.ref {
-					hashes := bc.ParseBlock(block, receipts)
-					promHashes = append(promHashes, hashes...)
+					pHashes := bc.ParseBlock(block, receipts)
+					for tNum, hashes := range pHashes {
+						promHashes[tNum] = append(promHashes[tNum], hashes...)
+					}
 				} else {
 					bc.UpdateShardStatus(block, receipts)
 				}
@@ -1896,7 +1898,7 @@ func (bc *BlockChain) DeleteLocks(ckeys *types.CKeys, thash common.Hash, shard u
 }
 
 // ParseBlock function extracts necessary information from a reference block
-func (bc *BlockChain) ParseBlock(block *types.Block, receipts types.Receipts) []common.Hash {
+func (bc *BlockChain) ParseBlock(block *types.Block, receipts types.Receipts) map[uint64][]common.Hash {
 	bc.gLocked.Mu.Lock()
 	defer bc.gLocked.Mu.Unlock()
 	var (
@@ -1906,7 +1908,7 @@ func (bc *BlockChain) ParseBlock(block *types.Block, receipts types.Receipts) []
 		refNum      = block.NumberU64()
 		eventOutput uint64
 		txID        uint64
-		promHashes  []common.Hash
+		promHashes  = make(map[uint64][]common.Hash)
 	)
 
 	// Create a holder for the new block from reference chain.
@@ -2028,14 +2030,20 @@ func (bc *BlockChain) ParseBlock(block *types.Block, receipts types.Receipts) []
 					// If batching is enabled, try to add the commit, on successful addition
 					// promote appropriate block!
 					if bc.AddGCommit(commit) {
-						promHashes = append(promHashes, ctxHash)
+						if _, tok := promHashes[tNum]; !tok {
+							promHashes[tNum] = []common.Hash{}
+						}
+						promHashes[tNum] = append(promHashes[tNum], ctxHash)
 					}
 				} else {
 					// If batching is not enabled, try to add individual commit and promote
 					// accordingly!
 					if tcb, tok := bc.pendingCrossTxs[ctxHash]; tok {
 						if tcb.AddTCommit(commit) {
-							promHashes = append(promHashes, ctxHash)
+							if _, tok := promHashes[tNum]; !tok {
+								promHashes[tNum] = []common.Hash{}
+							}
+							promHashes[tNum] = append(promHashes[tNum], ctxHash)
 						}
 					}
 				}

@@ -37,7 +37,7 @@ type NewMinedBlockEvent struct{ Block *types.Block }
 
 // TxPromotedEvent is posted when all commits for a cross-shard
 // shard transaction has been received
-type TxPromotedEvent struct{ PromHashes []common.Hash }
+type TxPromotedEvent struct{ PromHashes map[uint64][]common.Hash }
 
 // RemovedLogsEvent is posted when a reorg happens
 type RemovedLogsEvent struct{ Logs []*types.Log }
@@ -54,5 +54,5 @@ type ChainSideEvent struct {
 
 type ChainHeadEvent struct {
 	Block      *types.Block
-	PromHashes []common.Hash
+	PromHashes map[uint64][]common.Hash
 }

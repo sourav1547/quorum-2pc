@@ -126,6 +126,7 @@ type statusData struct {
 
 // getStateData to request data
 type getStateData struct {
+	RNum   uint64         // Ref block where the block was included
 	Root   common.Hash    // Block Hash
 	TxHash common.Hash    // Transaction Hash
 	Count  uint64         // Number of contracts
@@ -134,6 +135,7 @@ type getStateData struct {
 
 // stateData data response
 type stateData struct {
+	RNum   uint64          // Ref block number
 	Root   common.Hash     // Block Hash
 	TxHash common.Hash     // Transaction Hash
 	Count  uint64          // Number of contracts

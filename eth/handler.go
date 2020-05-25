@@ -949,15 +949,18 @@ func (pm *ProtocolManager) handleMsg(p *peer) error {
 		if err := msg.Decode(&request); err != nil {
 			return errResp(ErrDecode, "%v: %v", msg, err)
 		}
+		tNum := request.RNum
 		tHash := request.TxHash
 		root := request.Root
 		count := request.Count
 		results := pm.blockchain.StateData(root, request.Keys)
 		log.Debug("Received request from", "pshard", p.Shard(), "tHash", tHash, "root", root)
 
-		err := p.SendDataResponse(tHash, count, root, results)
-		if err != nil {
-			log.Error("Error in send state data response!", "error", err)
+		if results != nil {
+			err := p.SendDataResponse(tNum, tHash, count, root, results)
+			if err != nil {
+				log.Error("Error in send state data response!", "error", err)
+			}
 		}
 
 	case msg.Code == StateDataMsg:
@@ -965,6 +968,7 @@ func (pm *ProtocolManager) handleMsg(p *peer) error {
 		if err := msg.Decode(&request); err != nil {
 			return errResp(ErrDecode, "%v: %v", msg, err)
 		}
+		tNum := request.RNum
 		tHash := request.TxHash
 		root := request.Root
 		vals := request.Vals
@@ -978,7 +982,7 @@ func (pm *ProtocolManager) handleMsg(p *peer) error {
 		fmt.Fprintln(drespf, tHash.Hex(), p.Shard(), len(vals), root.Hex(), p.ID(), time.Now().Unix())
 		drespf.Close()
 		// Adding data!
-		go pm.AddFetchedData(tHash, p.Shard(), vals)
+		go pm.AddFetchedData(tNum, tHash, p.Shard(), vals)
 
 	default:
 		return errResp(ErrInvalidMsgCode, "%v", msg.Code)
@@ -991,12 +995,7 @@ func (pm *ProtocolManager) Enqueue(id string, block *types.Block) {
 }
 
 // AddFetchedData fills the data cache with data downloaded from peer
-func (pm *ProtocolManager) AddFetchedData(tHash common.Hash, pshard uint64, vals []*types.KeyVal) {
-	ftcb, ftok := pm.blockchain.Tcb(tHash)
-	if !ftok {
-		log.Warn("Transacion control block not found", "thash", tHash)
-		return
-	}
+func (pm *ProtocolManager) AddFetchedData(refNum uint64, tHash common.Hash, pshard uint64, vals []*types.KeyVal) {
 	// Creating a map out of received Data
 	mkvals := make(map[common.Address]*types.MKeyVal)
 	for _, keyval := range vals {
@@ -1010,7 +1009,7 @@ func (pm *ProtocolManager) AddFetchedData(tHash common.Hash, pshard uint64, vals
 	// Add data for transactions
 	hashes := []common.Hash{tHash}
 	if pm.blockchain.TxBatch() {
-		hashes = pm.refchain.RefCrossTxs(ftcb.RefNum)
+		hashes = pm.refchain.RefCrossTxs(refNum)
 	}
 	// Add data to all transactions!
 	promote := true
@@ -1031,16 +1030,17 @@ func (pm *ProtocolManager) AddFetchedData(tHash common.Hash, pshard uint64, vals
 }
 
 // FetchData requests data from appropriate shard
-func (pm *ProtocolManager) FetchData(tHash common.Hash) {
-	ftcb, ftok := pm.blockchain.Tcb(tHash)
-	if !ftok {
-		log.Warn("Transaction Control block not found", "hash", tHash)
-	}
-	refNum := ftcb.RefNum
+func (pm *ProtocolManager) FetchData(refNum uint64, tHash common.Hash) {
 	hashes := []common.Hash{tHash}
 	if pm.blockchain.TxBatch() {
 		hashes = pm.refchain.RefCrossTxs(refNum)
+	} else {
+		if _, ftok := pm.blockchain.Tcb(tHash); !ftok {
+			log.Warn("Transaction Control block not found", "hash", tHash)
+			return
+		}
 	}
+
 	// Downloading keys!
 	dKeys := make(map[uint64]map[common.Address]map[common.Hash]bool)
 	for _, hash := range hashes {
@@ -1070,6 +1070,7 @@ func (pm *ProtocolManager) FetchData(tHash common.Hash) {
 		if pm.refchain.TxBatch() {
 			root = pm.refchain.Commit(refNum, shard)
 		} else {
+			ftcb, _ := pm.blockchain.Tcb(tHash)
 			root = ftcb.Commits.Commits[shard].StateRoot
 		}
 		go pm.FetchDataShard(refNum, tHash, dKeys[shard], shard, root)
@@ -1114,7 +1115,7 @@ func (pm *ProtocolManager) FetchDataShard(refNum uint64, tHash common.Hash, sKey
 	defer dreqf.Close()
 	for _, peer := range requests {
 		fmt.Fprintln(dreqf, refNum, tHash.Hex(), count, kcount, root.Hex(), peer.ID(), time.Now().Unix())
-		peer.SendDataRequest(tHash, uint64(count), root, keys)
+		peer.SendDataRequest(refNum, tHash, uint64(count), root, keys)
 	}
 	return
 }
@@ -1422,8 +1423,10 @@ func (pm *ProtocolManager) minedBroadcastLoop() {
 func (pm *ProtocolManager) fetchForeignDataLoop() {
 	for obj := range pm.txPromotedSub.Chan() {
 		if ev, ok := obj.Data.(core.TxPromotedEvent); ok {
-			for _, tHash := range ev.PromHashes {
-				go pm.FetchData(tHash)
+			for tNum, hashes := range ev.PromHashes {
+				for _, hash := range hashes {
+					go pm.FetchData(tNum, hash)
+				}
 			}
 		}
 	}
