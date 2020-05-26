@@ -60,7 +60,7 @@ const (
 	minBroadcastPeers = 4
 
 	// minimun number of peers to request data
-	minRequestPeers = 2
+	minRequestPeers = 4 // todo: update these to vary with the number of shards
 )
 
 var (
@@ -1014,13 +1014,12 @@ func (pm *ProtocolManager) AddFetchedData(refNum uint64, tHash common.Hash, psha
 	// Add data to all transactions!
 	promote := true
 	for _, hash := range hashes {
-		tcb, tok := pm.blockchain.Tcb(hash)
-		if tok {
-			if !tcb.AddData(pshard, mkvals) {
-				promote = false
-			}
-		} else {
-			return
+		if tcb, tok := pm.blockchain.Tcb(hash); !tok {
+			promote = false
+			log.Error("Tcb not found during AddFetchData!")
+			continue
+		} else if !tcb.AddData(pshard, mkvals) {
+			promote = false
 		}
 	}
 	// If data recieved for all trasnactions then promote!
@@ -1242,6 +1241,7 @@ func (pm *ProtocolManager) BroadcastBlock(block *types.Block, propagate bool) {
 				ackSig, _ := hex.DecodeString("01b70096") // 01b70096: addAck(uint256,uint256,uint256,bytes32)
 				shardByte := make([]byte, 32)
 				binary.BigEndian.PutUint64(shardByte[24:], pm.myshard)
+				nonce := block.TxNonce()
 				for _, tx := range block.Transactions() {
 					txType := tx.TxType()
 					txData := tx.Data()
@@ -1254,8 +1254,8 @@ func (pm *ProtocolManager) BroadcastBlock(block *types.Block, propagate bool) {
 						index := 4 + u32
 						start += copy(data[start:], txData[index:index+3*u32]) // tid, bNum, tHash
 						start += copy(data[start:], croot.Bytes())             // root
-						nonce := pm.blockchain.AtomicNonce()
 						dTx := types.NewTransaction(types.TxnStatus, nonce, pm.myshard, pm.refAddress, big.NewInt(0), pm.stateGasLimit, pm.stateGasPrice, data)
+						nonce = nonce + 1
 						txs = append(txs, dTx)
 
 					} else if txType == types.CrossShardLocal {
@@ -1279,10 +1279,10 @@ func (pm *ProtocolManager) BroadcastBlock(block *types.Block, propagate bool) {
 						start += copy(data[start:], txidByte)  // txID
 						start += copy(data[start:], bNumByte)  // reference number
 						start += copy(data[start:], tHash.Bytes())
-						nonce := pm.blockchain.AtomicNonce()
 						// Creating the acknowledgement transaction and appending it to the
 						// list
 						aTx := types.NewTransaction(types.Acknowledgement, nonce, pm.myshard, pm.refAddress, big.NewInt(0), pm.stateGasLimit, pm.stateGasPrice, data)
+						nonce = nonce + 1
 						txs = append(txs, aTx)
 					}
 				}

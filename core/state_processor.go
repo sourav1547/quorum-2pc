@@ -93,7 +93,7 @@ func (p *StateProcessor) Process(block *types.Block, statedb, privateState *stat
 		if tx.TxType() == types.CrossShardLocal && err != nil {
 			statedb.RevertToSnapshot(snap)
 			privateState.RevertToSnapshot(psnap)
-			log.Warn("Error in CrossShardLocal transaction", "thash", tx.Hash(), "from", tx.From(), "error", err)
+			log.Debug("Error in CrossShardLocal transaction", "thash", tx.Hash(), "from", tx.From(), "error", err)
 
 			// Creating a dummy receipt
 			root := statedb.IntermediateRoot(false)

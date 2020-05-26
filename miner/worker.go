@@ -1500,6 +1500,7 @@ func (w *worker) commitNewWork(interrupt *int32, noempty bool, timestamp int64) 
 	header := &types.Header{
 		ParentHash: parent.Hash(),
 		Number:     num.Add(num, common.Big1),
+		TxNonce:    w.chain.GetNonceCount(parent.NumberU64()),
 		RefNumber:  w.getRefNumber(),
 		RefHash:    w.getRefHash(),
 		Shard:      w.eth.MyShard(),

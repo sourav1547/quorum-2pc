@@ -950,6 +950,7 @@ func RPCMarshalBlock(b *types.Block, inclTx bool, fullTx bool) (map[string]inter
 	fields := map[string]interface{}{
 		"number":           (*hexutil.Big)(head.Number),
 		"shard":            b.Shard(),
+		"txNonce":          b.TxNonce(),
 		"hash":             b.Hash(),
 		"parentHash":       head.ParentHash,
 		"nonce":            head.Nonce,

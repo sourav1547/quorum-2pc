@@ -25,6 +25,7 @@ func (h Header) MarshalJSON() ([]byte, error) {
 		Difficulty  *hexutil.Big   `json:"difficulty"       gencodec:"required"`
 		Number      *hexutil.Big   `json:"number"           gencodec:"required"`
 		RefNumber   *hexutil.Big   `json:"refNumber" 		gencodec:"required"`
+		TxNonce     hexutil.Uint64 `json:"txNonce" 			gencodec:"required"`
 		Shard       hexutil.Uint64 `json:"shard"	        gencodec:"required"`
 		GasLimit    hexutil.Uint64 `json:"gasLimit"         gencodec:"required"`
 		GasUsed     hexutil.Uint64 `json:"gasUsed"          gencodec:"required"`
@@ -47,6 +48,7 @@ func (h Header) MarshalJSON() ([]byte, error) {
 	enc.Difficulty = (*hexutil.Big)(h.Difficulty)
 	enc.Number = (*hexutil.Big)(h.Number)
 	enc.RefNumber = (*hexutil.Big)(h.RefNumber)
+	enc.TxNonce = hexutil.Uint64(h.TxNonce)
 	enc.Shard = hexutil.Uint64(h.Shard)
 	enc.GasLimit = hexutil.Uint64(h.GasLimit)
 	enc.GasUsed = hexutil.Uint64(h.GasUsed)
@@ -70,6 +72,7 @@ func (h *Header) UnmarshalJSON(input []byte) error {
 		Difficulty  *hexutil.Big    `json:"difficulty"       gencodec:"required"`
 		Number      *hexutil.Big    `json:"number"           gencodec:"required"`
 		RefNumber   *hexutil.Big    `json:"refNumber"        gencodec:"required"`
+		TxNonce     *hexutil.Uint64 `json:"txNonce"	         gencodec:"required"`
 		Shard       *hexutil.Uint64 `json:"shard"	         gencodec:"required"`
 		GasLimit    *hexutil.Uint64 `json:"gasLimit"         gencodec:"required"`
 		GasUsed     *hexutil.Uint64 `json:"gasUsed"          gencodec:"required"`
@@ -131,6 +134,10 @@ func (h *Header) UnmarshalJSON(input []byte) error {
 		return errors.New("missing required field 'shard' for Header")
 	}
 	h.Shard = uint64(*dec.Shard)
+	if dec.TxNonce == nil {
+		return errors.New("missing required field 'txNonce' for Header")
+	}
+	h.TxNonce = uint64(*dec.TxNonce)
 	if dec.GasLimit == nil {
 		return errors.New("missing required field 'gasLimit' for Header")
 	}

@@ -122,11 +122,11 @@ type BlockChain struct {
 	cacheConfig *CacheConfig        // Cache configuration for pruning
 
 	crossCount      int
-	nonce           uint64
 	commitAddress   common.Address                   // Address of state commitment transaction
 	pendingCrossTxs map[common.Hash]*types.TxControl // Pending Cross shard transactions
 	refCrossTxs     map[uint64][]common.Hash
 	promCrossTxs    map[common.Hash]bool
+	txNonces        map[uint64]uint64 // Start nonce for TxnStatus and Acknowledgement Transaction
 
 	procCtxs   map[common.Hash]bool                      // Map of already processed transaction
 	shardThMap map[uint64]map[uint64][]common.Hash       // ref-number: shard::tHash map
@@ -205,7 +205,6 @@ func NewBlockChain(db ethdb.Database, cacheConfig *CacheConfig, chainConfig *par
 		numShard:          numShard,
 		txBatch:           txBatch,
 		crossCount:        0,
-		nonce:             0,
 		ref:               ref,
 		chainConfig:       chainConfig,
 		cacheConfig:       cacheConfig,
@@ -230,6 +229,7 @@ func NewBlockChain(db ethdb.Database, cacheConfig *CacheConfig, chainConfig *par
 		shardThMap:        shardThMap,
 		shardCommits:      make(map[uint64]map[uint64]common.Hash),
 		thKeys:            make(map[common.Hash]map[uint64][]*types.CKeys),
+		txNonces:          make(map[uint64]uint64),
 		gLocked:           gLocked,
 		foreignDataCh:     make(chan struct{}),
 		logdir:            logdir,
@@ -245,6 +245,10 @@ func NewBlockChain(db ethdb.Database, cacheConfig *CacheConfig, chainConfig *par
 	bc.genesisBlock = bc.GetBlockByNumber(0)
 	if bc.genesisBlock == nil {
 		return nil, ErrNoGenesis
+	}
+
+	if bc.myshard > 0 && !bc.ref {
+		bc.txNonces[uint64(0)] = 0
 	}
 
 	if err := bc.loadLastState(); err != nil {
@@ -324,10 +328,14 @@ func (bc *BlockChain) AddCount(count int) {
 	bc.crossCount = bc.crossCount + count
 }
 
-// AtomicNonce returns and increment the nonce sets count
-func (bc *BlockChain) AtomicNonce() uint64 {
-	bc.nonce = bc.nonce + 1
-	return bc.nonce
+// AddNonceCount increments the global nonce
+func (bc *BlockChain) AddNonceCount(num, count uint64) {
+	bc.txNonces[num] = bc.txNonces[num-uint64(1)] + count
+}
+
+// GetNonceCount returns the starting nonce of any block
+func (bc *BlockChain) GetNonceCount(num uint64) uint64 {
+	return bc.txNonces[num]
 }
 
 // SetCommitAddress Sets the commit address of the chain.
@@ -1606,10 +1614,12 @@ func (bc *BlockChain) UpdateShardStatus(block *types.Block, receipts types.Recei
 	bc.gLocked.Mu.Lock()
 	defer bc.gLocked.Mu.Unlock()
 	var (
-		ccount = 0
-		csl    = 0
-		dec    = 0
-		bNum   = block.NumberU64()
+		ccount   = 0
+		ncount   = 0 // indicate by how much one should increase the nonce!
+		nUpdated = make(map[uint64]bool)
+		csl      = 0
+		dec      = 0
+		bNum     = block.NumberU64()
 	)
 	ltdata := bc.logdir + "ltdata"
 	ltdataf, err := os.OpenFile(ltdata, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
@@ -1640,6 +1650,7 @@ func (bc *BlockChain) UpdateShardStatus(block *types.Block, receipts types.Recei
 		if txType == types.CrossShardLocal {
 			tHash := tx.Hash()
 			tcb := bc.pendingCrossTxs[tHash]
+			tNum := tcb.RefNum
 			keyval := tcb.Keyval
 			for addr, cKeys := range keyval {
 				if tcb.AddrToShard[addr] == bc.myshard {
@@ -1660,6 +1671,14 @@ func (bc *BlockChain) UpdateShardStatus(block *types.Block, receipts types.Recei
 			delete(bc.promCrossTxs, tHash)
 			// Writing to csltimef
 			fmt.Fprintln(csltimef, bNum, tx.Hash().Hex(), time.Now().Unix())
+			if bc.TxBatch() {
+				if _, tok := nUpdated[tNum]; !tok {
+					ncount++
+					nUpdated[tNum] = false
+				}
+			} else {
+				ncount++
+			}
 		} else if txType == types.LocalDecision {
 			shard, tid, tNum, tHash, _ := types.DecodeDecision(true, tx)
 			_, tok := bc.pendingCrossTxs[tHash]
@@ -1671,6 +1690,7 @@ func (bc *BlockChain) UpdateShardStatus(block *types.Block, receipts types.Recei
 			if bc.TxBatch() {
 				hashes = bc.refCrossTxs[tNum]
 			}
+			ncount++
 			for _, hash := range hashes {
 				tcb := bc.pendingCrossTxs[hash]
 				keyval := tcb.Keyval
@@ -1699,6 +1719,7 @@ func (bc *BlockChain) UpdateShardStatus(block *types.Block, receipts types.Recei
 		}
 	}
 	bc.AddCount(ccount)
+	bc.AddNonceCount(bNum, uint64(ncount))
 	// Logging block information!
 	txLen := len(txs)
 	lbtime := bc.logdir + "lbtime"
@@ -1836,7 +1857,7 @@ func (bc *BlockChain) UpdateRefStatus(block *types.Block, receipts types.Receipt
 				fmt.Fprintln(ctxtimef, bNum, txID, tx.Hash().Hex(), numShard, time.Now().Unix())
 			} else if txType == types.Acknowledgement {
 				// Extracting acknowledgement information
-				shard, tid, bNum, tHash := types.DecodeAck(tx)
+				shard, tid, tNum, tHash := types.DecodeAck(tx)
 				shardThs := []common.Hash{tHash}
 				if bc.txBatch {
 					shardThs = bc.shardThMap[bNum][shard]
@@ -1850,14 +1871,14 @@ func (bc *BlockChain) UpdateRefStatus(block *types.Block, receipts types.Receipt
 						bc.DeleteLocks(ckeys, hash, shard)
 					}
 				}
-				log.Debug("Ack received!", "shard", shard, "bNum", bNum, "thash", tHash)
-				fmt.Fprintln(acktimef, shard, tid, bNum, tHash.Hex(), tx.Hash().Hex(), time.Now().Unix())
+				log.Debug("Ack received!", "shard", shard, "bNum", bNum, "tNum", tNum, "thash", tHash)
+				fmt.Fprintln(acktimef, shard, tx.Nonce(), bNum, tid, tNum, tHash.Hex(), tx.Hash().Hex(), time.Now().Unix())
 			}
 		}
 
 		if txType == types.TxnStatus {
 			shard, tid, tNum, tHash, root := types.DecodeDecision(false, tx)
-			fmt.Fprintln(txstimef, bNum, shard, tid, tNum, tHash.Hex(), root.Hex(), time.Now().Unix())
+			fmt.Fprintln(txstimef, shard, tx.Nonce(), bNum, tid, tNum, tHash.Hex(), root.Hex(), time.Now().Unix())
 		}
 	}
 	// Logging block information!
@@ -1970,12 +1991,10 @@ func (bc *BlockChain) ParseBlock(block *types.Block, receipts types.Receipts) ma
 					index += u32
 					txID = binary.BigEndian.Uint64(receipt.Logs[0].Data[index+u24 : index+u32])
 				}
-			} else {
-				log.Debug("rStatus passed", "txType", tx.TxType())
-				continue
 			}
 		} else {
 			log.Debug("Not parsing transaction", "rs", rStatus, "txType", tx.TxType(), "logs", receipt.Logs)
+			continue
 		}
 
 		if txStatus {
@@ -2019,7 +2038,7 @@ func (bc *BlockChain) ParseBlock(block *types.Block, receipts types.Receipts) ma
 				shard, tid, tNum, ctxHash, root := types.DecodeDecision(false, tx)
 				log.Debug("TxnStatus received", "hash", ctxHash, "shard", shard, "root", root, "tn", tNum, "rn", refNum)
 				// Writing to file!
-				fmt.Fprintln(txstimef, refNum, shard, tid, tNum, ctxHash.Hex(), root.Hex(), time.Now().Unix())
+				fmt.Fprintln(txstimef, shard, tx.Nonce(), refNum, tid, tNum, ctxHash.Hex(), root.Hex(), time.Now().Unix())
 				// Don't do anything on trasnaction status from own shard
 				if bc.myshard == shard {
 					continue
@@ -2051,7 +2070,7 @@ func (bc *BlockChain) ParseBlock(block *types.Block, receipts types.Receipts) ma
 		}
 		if txType == types.Acknowledgement {
 			shard, tid, tNum, tHash := types.DecodeAck(tx)
-			fmt.Fprintln(txstimef, refNum, rStatus, shard, tid, tNum, tHash.Hex(), time.Now().Unix())
+			fmt.Fprintln(acktimef, shard, tx.Nonce(), refNum, tid, tNum, tHash.Hex(), tx.Hash().Hex(), time.Now().Unix())
 		}
 	}
 	// Logging block information!

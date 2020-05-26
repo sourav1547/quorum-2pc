@@ -789,11 +789,20 @@ func (pool *TxPool) enqueueTx(hash common.Hash, tx *types.Transaction) (bool, er
 	// Try to insert the transaction into the future queue
 	from, _ := types.Sender(pool.signer, tx) // already validated
 	txType := tx.TxType()
-	if pool.queue[from] == nil {
-		pool.queue[from] = newTxList(false)
-	}
-	if pool.pending[from] == nil {
-		pool.pending[from] = newTxList(false)
+	if txType == types.TxnStatus || txType == types.Acknowledgement {
+		if pool.queue[from] == nil {
+			pool.queue[from] = newTxList(true)
+		}
+		if pool.pending[from] == nil {
+			pool.pending[from] = newTxList(true)
+		}
+	} else {
+		if pool.queue[from] == nil {
+			pool.queue[from] = newTxList(false)
+		}
+		if pool.pending[from] == nil {
+			pool.pending[from] = newTxList(false)
+		}
 	}
 
 	var (

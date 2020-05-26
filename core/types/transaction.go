@@ -883,9 +883,9 @@ func NewTxControl(rNum uint64, status bool) *TxControl {
 func (tcb *TxControl) AddData(shard uint64, mkvals map[common.Address]*MKeyVal) bool {
 	tcb.TxControlMu.Lock()
 	defer tcb.TxControlMu.Unlock()
-	// If no address from that particular shard!
+	// If no address from that particular shard, return current status!
 	if _, sok := tcb.ShardStatus[shard]; !sok {
-		return true
+		return tcb.Status
 	}
 	if !tcb.ShardStatus[shard] && len(mkvals) > 0 {
 		for addr, keys := range tcb.Keyval {
@@ -909,10 +909,9 @@ func (tcb *TxControl) AddData(shard uint64, mkvals map[common.Address]*MKeyVal) 
 		tcb.Received++
 		if tcb.Received == tcb.Required {
 			tcb.Status = true
-			return true
 		}
 	}
-	return false
+	return tcb.Status
 }
 
 // InitTxControl adds transaction detail

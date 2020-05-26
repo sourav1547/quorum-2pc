@@ -75,6 +75,7 @@ type Header struct {
 	Coinbase    common.Address `json:"miner"            gencodec:"required"`
 	Root        common.Hash    `json:"stateRoot"        gencodec:"required"`
 	TxHash      common.Hash    `json:"transactionsRoot" gencodec:"required"`
+	TxNonce     uint64         `json:"txNonce" 			gencodec:"required"`
 	ReceiptHash common.Hash    `json:"receiptsRoot"     gencodec:"required"`
 	Bloom       Bloom          `json:"logsBloom"        gencodec:"required"`
 	Difficulty  *big.Int       `json:"difficulty"       gencodec:"required"`
@@ -94,6 +95,7 @@ type headerMarshaling struct {
 	Difficulty *hexutil.Big
 	Number     *hexutil.Big
 	RefNumber  *hexutil.Big
+	TxNonce    hexutil.Uint64
 	Shard      hexutil.Uint64
 	GasLimit   hexutil.Uint64
 	GasUsed    hexutil.Uint64
@@ -303,6 +305,7 @@ func (b *Block) Transaction(hash common.Hash) *Transaction {
 
 func (b *Block) Number() *big.Int     { return new(big.Int).Set(b.header.Number) }
 func (b *Block) RefNumber() *big.Int  { return new(big.Int).Set(b.header.RefNumber) }
+func (b *Block) TxNonce() uint64      { return b.header.TxNonce }
 func (b *Block) Shard() uint64        { return b.header.Shard }
 func (b *Block) GasLimit() uint64     { return b.header.GasLimit }
 func (b *Block) GasUsed() uint64      { return b.header.GasUsed }
