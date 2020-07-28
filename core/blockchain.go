@@ -2031,7 +2031,7 @@ func (bc *BlockChain) ParseBlock(block *types.Block, receipts types.Receipts) ma
 						bc.refCrossTxs[refNum] = append(bc.refCrossTxs[refNum], ctxHash)
 						log.Debug("New cross shard transaction added!", "bn", refNum, "shards", shardsInvolved, "th", ctxHash, "len", len(bc.refCrossTxs[refNum]))
 					}
-					fmt.Fprintln(ctxtimef, refNum, txID, tx.Hash().Hex(), ctxHash, numShards, time.Now().Unix())
+					fmt.Fprintln(ctxtimef, refNum, txID, tx.Hash().Hex(), ctxHash.Hex(), numShards, time.Now().Unix())
 				}
 			} else if txType == types.TxnStatus {
 				// bNum is the block number that includes the cross-shard transaciton!
