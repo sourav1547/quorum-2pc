@@ -658,7 +658,7 @@ func (pool *TxPool) validateTx(tx *types.Transaction, local bool) error {
 		return ErrUnderpriced
 	}
 	// Ensure the transaction adheres to nonce ordering
-	if pool.currentState.GetNonce(from) > tx.Nonce() && tx.TxType() != types.CrossShard {
+	if pool.currentState.GetNonce(from) > tx.Nonce() && (tx.TxType() != types.CrossShard || tx.TxType() != types.IntraShard) {
 		return ErrNonceTooLow
 	}
 	// Ether value is not currently supported on private transactions
@@ -809,7 +809,7 @@ func (pool *TxPool) enqueueTx(hash common.Hash, tx *types.Transaction) (bool, er
 		inserted bool
 		old      *types.Transaction
 	)
-	if txType == types.CrossShard || txType == types.TxnStatus || txType == types.Acknowledgement {
+	if txType == types.CrossShard || txType == types.TxnStatus || txType == types.Acknowledgement || txType == types.IntraShard {
 		inserted, old = pool.pending[from].Add(tx, pool.config.PriceBump)
 		go pool.txFeed.Send(NewTxsEvent{types.Transactions{tx}})
 	} else {

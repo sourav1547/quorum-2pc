@@ -22,6 +22,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"math/big"
 	"os"
 	"sync"
@@ -248,6 +249,7 @@ func newWorker(config *params.ChainConfig, engine consensus.Engine, eth Backend,
 		crossWorkCh:        make(chan struct{}),
 		pendingResultCh:    make(chan struct{}),
 		stopProcessCh:      make(chan struct{}),
+		logdir:             logdir,
 	}
 
 	if _, ok := engine.(consensus.Istanbul); ok || !config.IsQuorum || config.Clique != nil {
@@ -825,6 +827,49 @@ func (w *worker) unlockShardKeys(shardTxs map[common.Address]types.Transactions)
 	}
 }
 
+// Selects new valid intra-shard transactions and push the others to pending
+func (w *worker) NewValidIntraTransactions(intraTxs map[common.Address]types.Transactions) map[common.Address]types.Transactions {
+	var (
+		niTxs  = make(map[common.Address]types.Transactions)
+		start  = 0
+		end    = 0
+		others = 0
+		data   []byte
+	)
+	// Opening the file to log attempted transactions
+	attempt := w.logdir + "iattempt"
+	attemptf, err := os.OpenFile(attempt, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		log.Error("Can't open iattempt file", "error", err)
+	}
+	// iterator through all creator
+	for creator, txs := range intraTxs {
+		start += len(txs)
+
+		for _, tx := range txs {
+			// discard transactions which are not intra-shard
+			if tx.TxType() != types.IntraShard {
+				others = others + 1
+				continue
+			}
+			data = tx.Data()[4:]
+			allKeys := types.GetIntraRWSet(w.eth.MyShard(), data)
+			include := false
+			if include = w.checkTxStatus(allKeys); include {
+				if _, cok := niTxs[creator]; !cok {
+					niTxs[creator] = types.Transactions{}
+				}
+				niTxs[creator] = append(niTxs[creator], tx)
+				end = end + 1
+			}
+			fmt.Fprintln(attemptf, tx.Hash().Hex(), include, time.Now().Unix())
+		}
+	}
+	attemptf.Close()
+	log.Info("@itx, Returning NewValidIntraTransactions", "start", start, "end", end, "others", others)
+	return niTxs
+}
+
 // NewValidCrossTransactions extracts the current valid cross-shard transactions
 func (w *worker) NewValidCrossTransactions(crossTxs map[common.Address]types.Transactions) map[common.Address]types.Transactions {
 	var (
@@ -838,6 +883,13 @@ func (w *worker) NewValidCrossTransactions(crossTxs map[common.Address]types.Tra
 		data     []byte
 		shards   []uint64
 	)
+	// Opening the file to log attempted transactions
+	attempt := w.logdir + "attempt"
+	attemptf, err := os.OpenFile(attempt, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		log.Error("Can't open rtime file", "error", err)
+	}
+
 	for creator, txs := range crossTxs {
 		start += len(txs)
 		for _, tx := range txs {
@@ -858,7 +910,8 @@ func (w *worker) NewValidCrossTransactions(crossTxs map[common.Address]types.Tra
 			// Fetch all read-write keys of a transaction
 			allKyes, _, _ := types.GetAllRWSet(uint16(numShard), data[index:])
 			// If can inlucde the latest transaction
-			if include := w.checkTxStatus(allKyes); include {
+			include := false
+			if include = w.checkTxStatus(allKyes); include {
 				if _, cok := newCtxs[creator]; !cok {
 					newCtxs[creator] = types.Transactions{}
 				}
@@ -866,8 +919,10 @@ func (w *worker) NewValidCrossTransactions(crossTxs map[common.Address]types.Tra
 				end = end + 1
 				w.updateLockStatus(allKyes)
 			}
+			fmt.Fprintln(attemptf, tx.Hash().Hex(), include, time.Now().Unix())
 		}
 	}
+	attemptf.Close()
 	log.Info("@ctx, Returning NewValidCrossTransactions", "start", start, "end", end, "others", others)
 	return newCtxs
 }
@@ -1187,6 +1242,8 @@ func (w *worker) commitInitialContract(coinbase common.Address, interrupt *int32
 	return false
 }
 
+// commitCrossTransactions executes promoted cross-shard transactions from previous
+// client blocks
 func (w *worker) commitCrossTransactions(tHashes []common.Hash, coinbase common.Address, interrupt *int32) bool {
 	if w.current == nil {
 		return true
@@ -1279,6 +1336,7 @@ func (w *worker) commitCrossTransactions(tHashes []common.Hash, coinbase common.
 	return false
 }
 
+// commitNewTransactions commits
 func (w *worker) commitNewTransactions(tHashes []common.Hash, coinbase common.Address, interrupt *int32) bool {
 	if w.current == nil {
 		return true
@@ -1661,17 +1719,23 @@ func (w *worker) commitNewWork(interrupt *int32, noempty bool, timestamp int64) 
 			}
 		}
 		if len(localTxs) > 0 {
-			txs := types.NewTransactionsByPriceAndNonce(w.current.signer, localTxs)
-			if w.commitTransactions(txs, w.coinbase, interrupt) {
-				w.gLocked.Mu.RUnlock()
-				return
+			ltxs := w.NewValidIntraTransactions(localTxs)
+			if len(ltxs) > 0 {
+				txs := types.NewTransactionsByPriceAndNonce(w.current.signer, ltxs)
+				if w.commitTransactions(txs, w.coinbase, interrupt) {
+					w.gLocked.Mu.RUnlock()
+					return
+				}
 			}
 		}
 		if len(remoteTxs) > 0 {
-			txs := types.NewTransactionsByPriceAndNonce(w.current.signer, remoteTxs)
-			if w.commitTransactions(txs, w.coinbase, interrupt) {
-				w.gLocked.Mu.RUnlock()
-				return
+			rtxs := w.NewValidIntraTransactions(remoteTxs)
+			if len(rtxs) > 0 {
+				txs := types.NewTransactionsByPriceAndNonce(w.current.signer, rtxs)
+				if w.commitTransactions(txs, w.coinbase, interrupt) {
+					w.gLocked.Mu.RUnlock()
+					return
+				}
 			}
 		}
 		// Produce status of new cross-shard tranactons while respecting

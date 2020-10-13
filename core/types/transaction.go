@@ -687,6 +687,42 @@ func GetRWSet(numContracts uint16, index uint16, data []byte) ([]*CKeys, uint16)
 	return allKeys, index
 }
 
+// GetIntraRWSet extracts the read-write set of a intra-shard transactions
+// Maintaining the format so that we can use existing code.
+func GetIntraRWSet(shard uint64, data []byte) map[uint64][]*CKeys {
+	var (
+		sKeys   []*CKeys
+		u20     = uint16(20)
+		u32     = uint16(32)
+		addr    common.Address
+		allKeys = make(map[uint64][]*CKeys)
+		index   = uint16(0)
+	)
+	numContracts := binary.BigEndian.Uint16(data[index:2])
+	index += 2
+	for i := uint16(0); i < numContracts; i++ {
+		addr = common.BytesToAddress(data[index : index+u20])
+		index += u20
+		numKeys := binary.BigEndian.Uint16(data[index : index+2])
+		index += 2
+		cKeys := &CKeys{Addr: addr, Keys: []common.Hash{}}
+		for k := uint16(0); k < numKeys; k++ {
+			key := common.BytesToHash(data[index : index+u32])
+			index += u32
+			cKeys.Keys = append(cKeys.Keys, key)
+
+			// Checking if the key is been written to or not
+			if int(data[index]) == 1 {
+				cKeys.WKeys = append(cKeys.WKeys, key)
+			}
+			index++
+		}
+		sKeys = append(sKeys, cKeys)
+	}
+	allKeys[shard] = sKeys
+	return allKeys
+}
+
 // GetAllRWSet return all read-write set used in a cross-shard transaction
 func GetAllRWSet(numShard uint16, data []byte) (map[uint64][]*CKeys, []uint64, uint16) {
 	var (
